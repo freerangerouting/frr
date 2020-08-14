@@ -1221,7 +1221,7 @@ static void connected_dump_vty(struct vty *vty, struct connected *connected)
 	if (CHECK_FLAG(connected->flags, ZEBRA_IFA_UNNUMBERED))
 		vty_out(vty, " unnumbered");
 
-	if (connected->label)
+	if (connected->label && !ALIAS_AS_IFNAME)
 		vty_out(vty, " %s", connected->label);
 
 	vty_out(vty, "\n");
@@ -1294,15 +1294,15 @@ static void ifs_dump_brief_vty(struct vty *vty, struct vrf *vrf)
 		bool first_pfx_printed = false;
 
 		if (print_header) {
-			vty_out(vty, "%-16s%-8s%-16s%s\n", "Interface",
-				"Status", "VRF", "Addresses");
-			vty_out(vty, "%-16s%-8s%-16s%s\n", "---------",
-				"------", "---", "---------");
+			vty_out(vty, "%-*s%-8s%-16s%s\n", INTERFACE_NAMSIZ,
+				"Interface", "Status", "VRF", "Addresses");
+			vty_out(vty, "%-*s%-8s%-16s%s\n", INTERFACE_NAMSIZ,
+				"---------", "------", "---", "---------");
 			print_header = false; /* We have at least 1 iface */
 		}
 		zebra_if = ifp->info;
 
-		vty_out(vty, "%-16s", ifp->name);
+		vty_out(vty, "%-*s", INTERFACE_NAMSIZ, ifp->name);
 
 		if (if_is_up(ifp))
 			vty_out(vty, "%-8s", "up");
@@ -1811,45 +1811,42 @@ static void if_show_description(struct vty *vty, struct vrf *vrf)
 {
 	struct interface *ifp;
 
-	vty_out(vty, "Interface       Status  Protocol  Description\n");
+	vty_out(vty, "%-*s Status  Protocol   Description\n", INTERFACE_NAMSIZ,
+		"Interface");
+
 	FOR_ALL_INTERFACES (vrf, ifp) {
-		int len;
+
 		struct zebra_if *zif;
-		bool intf_desc;
 
-		intf_desc = false;
-
-		len = vty_out(vty, "%s", ifp->name);
-		vty_out(vty, "%*s", (16 - len), " ");
+		vty_out(vty, "%-*s", INTERFACE_NAMSIZ, ifp->name);
 
 		if (if_is_up(ifp)) {
-			vty_out(vty, "up      ");
+			vty_out(vty, " up      ");
 			if (CHECK_FLAG(ifp->status,
 				       ZEBRA_INTERFACE_LINKDETECTION)) {
 				if (if_is_running(ifp))
-					vty_out(vty, "up        ");
+					vty_out(vty, " up        ");
 				else
-					vty_out(vty, "down      ");
+					vty_out(vty, " down      ");
 			} else {
-				vty_out(vty, "unknown   ");
+				vty_out(vty, " unknown   ");
 			}
 		} else {
-			vty_out(vty, "down    down      ");
+			vty_out(vty, " down    down      ");
 		}
 
-		if (ifp->desc) {
-			intf_desc = true;
+		if (ifp->desc)
 			vty_out(vty, "%s", ifp->desc);
-		}
+
 		zif = ifp->info;
 		if (zif && zif->desc) {
-			vty_out(vty, "%s%s",
-				intf_desc
-					? "\n                                  "
-					: "",
-				zif->desc);
-		}
 
+			if (ifp->desc)
+				vty_out(vty, "\n%*s%s", INTERFACE_NAMSIZ + 20,
+					"", zif->desc);
+			else
+				vty_out(vty, "%s", zif->desc);
+		}
 		vty_out(vty, "\n");
 	}
 }
@@ -3560,7 +3557,7 @@ static int if_config_write(struct vty *vty)
 					}
 					vty_out(vty, "/%d", p->prefixlen);
 
-					if (ifc->label)
+					if (ifc->label && !ALIAS_AS_IFNAME)
 						vty_out(vty, " label %s",
 							ifc->label);
 
