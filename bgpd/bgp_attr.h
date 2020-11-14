@@ -138,8 +138,29 @@ struct bgp_attr_srv6_l3vpn {
 	struct in6_addr sid;
 };
 
+struct attr_extra {
+	/* PMSI tunnel type (RFC 6514). */
+	enum pta_type pmsi_tnl_type;
+
+	/* Extended Communities attribute. */
+	struct ecommunity *ipv6_ecommunity;
+
+	/* Route-Reflector Cluster attribute */
+	struct cluster_list *cluster1;
+
+	/* EVPN */
+	struct bgp_route_evpn evpn_overlay;
+
+#ifdef ENABLE_BGP_VNC
+	struct bgp_attr_encap_subtlv *vnc_subtlvs; /* VNC-specific */
+#endif
+
+};
+
 /* BGP core attribute structure. */
 struct attr {
+	struct attr_extra *extra;
+
 	/* AS Path structure */
 	struct aspath *aspath;
 
@@ -161,9 +182,6 @@ struct attr {
 	/* Path origin attribute */
 	uint8_t origin;
 
-	/* PMSI tunnel type (RFC 6514). */
-	enum pta_type pmsi_tnl_type;
-
 	/* has the route-map changed any attribute?
 	   Used on the peer outbound side. */
 	uint32_t rmap_change_flags;
@@ -178,14 +196,8 @@ struct attr {
 	/* Extended Communities attribute. */
 	struct ecommunity *ecommunity;
 
-	/* Extended Communities attribute. */
-	struct ecommunity *ipv6_ecommunity;
-
 	/* Large Communities attribute. */
 	struct lcommunity *lcommunity;
-
-	/* Route-Reflector Cluster attribute */
-	struct cluster_list *cluster;
 
 	/* Unknown transitive attribute. */
 	struct transit *transit;
@@ -261,12 +273,6 @@ struct attr {
 	uint16_t encap_tunneltype;		     /* grr */
 	struct bgp_attr_encap_subtlv *encap_subtlvs; /* rfc5512 */
 
-#ifdef ENABLE_BGP_VNC
-	struct bgp_attr_encap_subtlv *vnc_subtlvs; /* VNC-specific */
-#endif
-	/* EVPN */
-	struct bgp_route_evpn evpn_overlay;
-
 	/* EVPN MAC Mobility sequence number, if any. */
 	uint32_t mm_seqnum;
 	/* highest MM sequence number rxed in a MAC-IP route from an
@@ -331,7 +337,7 @@ struct transit {
 
 #define BGP_CLUSTER_LIST_LENGTH(attr)                                          \
 	(((attr)->flag & ATTR_FLAG_BIT(BGP_ATTR_CLUSTER_LIST))                 \
-		 ? (attr)->cluster->length                                     \
+		 ? bgp_attr_get_cluster((attr))->length                        \
 		 : 0)
 
 typedef enum {
@@ -457,4 +463,125 @@ static inline uint32_t mac_mobility_seqnum(struct attr *attr)
 {
 	return (attr) ? attr->mm_seqnum : 0;
 }
+
+extern struct attr_extra *bgp_attr_extra_alloc(void);
+
+static inline enum pta_type bgp_attr_get_pmsi_tnl_type(struct attr *attr)
+{
+	if (attr->extra)
+		return attr->extra->pmsi_tnl_type;
+
+	return 0;
+}
+
+static inline void bgp_attr_set_pmsi_tnl_type(struct attr *attr,
+					      enum pta_type pmsi_tnl_type)
+{
+	if (!attr->extra)
+		attr->extra = bgp_attr_extra_alloc();
+
+	attr->extra->pmsi_tnl_type = pmsi_tnl_type;
+}
+
+static inline struct ecommunity *
+bgp_attr_get_ipv6_ecommunity(const struct attr *attr)
+{
+	if (attr->extra)
+		return attr->extra->ipv6_ecommunity;
+
+	return NULL;
+}
+
+static inline void bgp_attr_set_ipv6_ecommunity(struct attr *attr,
+						struct ecommunity *ipv6_ecomm)
+{
+	if (!attr->extra) {
+		if (!ipv6_ecomm)
+			return;
+
+		attr->extra = bgp_attr_extra_alloc();
+	}
+
+	attr->extra->ipv6_ecommunity = ipv6_ecomm;
+}
+
+static inline struct transit *bgp_attr_get_transit(const struct attr *attr)
+{
+	return attr->transit;
+}
+
+static inline void bgp_attr_set_transit(struct attr *attr,
+					struct transit *transit)
+{
+	attr->transit = transit;
+}
+
+static inline struct cluster_list *bgp_attr_get_cluster(const struct attr *attr)
+{
+	if (attr->extra)
+		return attr->extra->cluster1;
+
+	return NULL;
+}
+
+static inline void bgp_attr_set_cluster(struct attr *attr,
+					struct cluster_list *cl)
+{
+	if (!attr->extra) {
+		if (!cl)
+			return;
+		attr->extra = bgp_attr_extra_alloc();
+	}
+
+	attr->extra->cluster1 = cl;
+}
+
+static inline const struct bgp_route_evpn *
+bgp_attr_get_evpn_overlay(const struct attr *attr)
+{
+	static struct bgp_route_evpn no_evpn_overlay;
+
+	if (!attr->extra) {
+		memset(&no_evpn_overlay, 0, sizeof(no_evpn_overlay));
+		return &no_evpn_overlay;
+	}
+
+	return &attr->extra->evpn_overlay;
+}
+
+static inline void bgp_attr_set_evpn_overlay(struct attr *attr,
+					     struct bgp_route_evpn *eo)
+{
+	if (!attr->extra) {
+		if (!eo)
+			return;
+		attr->extra = bgp_attr_extra_alloc();
+	}
+
+	memcpy(&attr->extra->evpn_overlay, eo, sizeof(struct bgp_route_evpn));
+}
+
+static inline struct bgp_attr_encap_subtlv *
+bgp_attr_get_vnc_subtlvs(const struct attr *attr)
+{
+	if (attr->extra)
+		return attr->extra->vnc_subtlvs;
+
+	return NULL;
+}
+
+static inline void
+bgp_attr_set_vnc_subtlvs(struct attr *attr,
+			 struct bgp_attr_encap_subtlv *vnc_subtlvs)
+{
+	if (!attr->extra) {
+		if (!vnc_subtlvs)
+			return;
+
+		attr->extra = bgp_attr_extra_alloc();
+	}
+
+	attr->extra->vnc_subtlvs = vnc_subtlvs;
+}
+
 #endif /* _QUAGGA_BGP_ATTR_H */
