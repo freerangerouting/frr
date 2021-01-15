@@ -28,6 +28,8 @@ from time import sleep
 from lib.topolog import logger
 from lib.topotest import frr_unicode
 from ipaddress import IPv6Address
+import sys
+
 # Import common_config to use commomnly used APIs
 from lib.common_config import (
     create_common_configuration,
@@ -327,8 +329,47 @@ def __create_ospf_global(
                         cmd = "no {}".format(cmd)
                     config_data.append(cmd)
 
+        # ospf gr information
+        gr_data = ospf_data.setdefault("graceful-restart", {})
+        if gr_data:
+
+            if "opaque" in gr_data and gr_data["opaque"]:
+                cmd = "capability opaque"
+                if gr_data.setdefault("delete", False):
+                    cmd = "no {}".format(cmd)
+                config_data.append(cmd)
+
+            if "helper-only" in gr_data and not gr_data["helper-only"]:
+                cmd = "graceful-restart helper-only"
+                if gr_data.setdefault("delete", False):
+                    cmd = "no {}".format(cmd)
+                config_data.append(cmd)
+            elif "helper-only" in gr_data and type(gr_data["helper-only"]) is list:
+                for rtrs in gr_data["helper-only"]:
+                    cmd = "graceful-restart helper-only {}".format(rtrs)
+                    if gr_data.setdefault("delete", False):
+                        cmd = "no {}".format(cmd)
+                    config_data.append(cmd)
+
+            if "helper" in gr_data:
+                if type(gr_data["helper"]) is not list:
+                    gr_data["helper"] = list(gr_data["helper"])
+                for helper_role in gr_data["helper"]:
+                    cmd = "graceful-restart helper {}".format(helper_role)
+                    if gr_data.setdefault("delete", False):
+                        cmd = "no {}".format(cmd)
+                    config_data.append(cmd)
+
+            if "supported-grace-time" in gr_data:
+                cmd = "graceful-restart helper supported-grace-time {}".format(
+                    gr_data["supported-grace-time"]
+                )
+                if gr_data.setdefault("delete", False):
+                    cmd = "no {}".format(cmd)
+                config_data.append(cmd)
+
         result = create_common_configuration(
-            tgen, router, config_data, ospf, build, load_config
+            tgen, router, config_data, "ospf", build, load_config
         )
 
     except InvalidCLIError:
@@ -502,7 +543,7 @@ def config_ospf_interface(tgen, topo, input_dict=None, build=False, load_config=
             # interface ospf mtu
             if data_ospf_mtu:
                 cmd = "ip ospf mtu-ignore"
-                if 'del_action' in ospf_data:
+                if "del_action" in ospf_data:
                     cmd = "no {}".format(cmd)
                 config_data.append(cmd)
 
@@ -580,7 +621,9 @@ def redistribute_ospf(tgen, topo, dut, route_type, **kwargs):
 # Verification procs
 ################################
 @retry(attempts=40, wait=2, return_is_str=True)
-def verify_ospf_neighbor(tgen, topo, dut=None, input_dict=None, lan=False, expected=True):
+def verify_ospf_neighbor(
+    tgen, topo, dut=None, input_dict=None, lan=False, expected=True
+):
     """
     This API is to verify ospf neighborship by running
     show ip ospf neighbour command,
@@ -1237,7 +1280,9 @@ def verify_ospf_rib(
 
 
 @retry(attempts=10, wait=2, return_is_str=True)
-def verify_ospf_interface(tgen, topo, dut=None, lan=False, input_dict=None, expected=True):
+def verify_ospf_interface(
+    tgen, topo, dut=None, lan=False, input_dict=None, expected=True
+):
     """
     This API is to verify ospf routes by running
     show ip ospf interface command.
@@ -2230,5 +2275,68 @@ def config_ospf6_interface (tgen, topo, input_dict=None, build=False,
                 result = create_common_configuration(tgen, router, config_data,
                                              "interface_config",
                                              build=build)
+    logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
+    return result
+
+@retry(attempts=10, wait=2, return_is_str=True)
+def verify_ospf_gr_helper(tgen, topo, dut, input_dict=None):
+    """
+    This API is used to vreify gr helper using command
+    show ip ospf graceful-restart helper
+
+    Parameters
+    ----------
+    * `tgen` : Topogen object
+    * `topo` : topology descriptions
+    * 'dut' : router
+    * 'input_dict' - values to be verified
+
+    Usage:
+    -------
+    input_dict = {
+                    "helperSupport":"Disabled",
+                    "strictLsaCheck":"Enabled",
+                    "restartSupoort":"Planned and Unplanned Restarts",
+                    "supportedGracePeriod":1800
+                }
+    result = verify_ospf_gr_helper(tgen, topo, dut, input_dict)
+
+    """
+    logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
+    result = False
+
+    if 'ospf' not in topo['routers'][dut]:
+        errormsg = "[DUT: {}] OSPF is not configured on the router.".format(
+            router)
+        return errormsg
+
+    rnode = tgen.routers()[dut]
+    logger.info("Verifying OSPF GR details on router %s:", dut)
+    show_ospf_json = run_frr_cmd(rnode, "show ip ospf graceful-restart helper json",
+                                 isjson=True)
+
+    # Verifying output dictionary show_ospf_json is empty or not
+    if not bool(show_ospf_json):
+        errormsg = "OSPF is not running"
+        raise ValueError (errormsg)
+        return errormsg
+
+    for ospf_gr, gr_data  in input_dict.items():
+        try:
+            if input_dict[ospf_gr] == show_ospf_json[ospf_gr]:
+                logger.info("[DUT: FRR] OSPF GR Helper: %s is %s", ospf_gr,
+                    show_ospf_json[ospf_gr])
+                result = True
+            else:
+                errormsg = ("[DUT: FRR] OSPF GR Helper: {} expected is {}, Found "
+                "is {}".format(ospf_gr, input_dict[ospf_gr], show_ospf_json[
+                    ospf_gr]))
+                raise ValueError (errormsg)
+                return errormsg
+
+        except KeyError:
+            errormsg = ("[DUT: FRR] OSPF GR Helper: {}".format(ospf_gr))
+            return errormsg
+
     logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
     return result
