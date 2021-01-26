@@ -48,6 +48,7 @@
 #include "lib_errors.h"
 #include "northbound_cli.h"
 #include "network.h"
+#include "keycrypt.h"
 
 #include "frrscript.h"
 
@@ -2006,6 +2007,8 @@ DEFUN (service_password_encrypt,
 			XSTRDUP(MTYPE_HOST, zencrypt(host.enable));
 	}
 
+	keycrypt_state_change(true);
+
 	return CMD_SUCCESS;
 }
 
@@ -2028,6 +2031,8 @@ DEFUN (no_service_password_encrypt,
 	if (host.enable_encrypt)
 		XFREE(MTYPE_HOST, host.enable_encrypt);
 	host.enable_encrypt = NULL;
+
+	keycrypt_state_change(false);
 
 	return CMD_SUCCESS;
 }
