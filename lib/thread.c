@@ -1452,12 +1452,38 @@ static void thread_process_io(struct thread_master *m, unsigned int num)
 static unsigned int thread_process_timers(struct thread_timer_list_head *timers,
 					  struct timeval *timenow)
 {
+#ifdef CONSUMED_TIME_CHECK
+	struct timeval prev = *timenow;
+#endif
 	struct thread *thread;
 	unsigned int ready = 0;
 
+#ifdef CONSUMED_TIME_CHECK
+	prev.tv_sec -= CONSUMED_TIME_CHECK / 1000000;
+#endif
 	while ((thread = thread_timer_list_first(timers))) {
 		if (timercmp(timenow, &thread->u.sands, <))
 			return ready;
+
+#ifdef CONSUMED_TIME_CHECK
+		prev = thread->u.sands;
+		prev.tv_sec += CONSUMED_TIME_CHECK / 1000000;
+		/*
+		 * If the timer would have popped CONSUMED_TIME_CHECK
+		 * seconds in the past then we are in a situation
+		 * where we are really getting behind
+		 * on handling of events.  Let's log it
+		 * and do the right thing with it.
+		 */
+		if (timercmp(&prev, &thread->u.sands, <)) {
+			flog_warn(
+				EC_LIB_STARVE_THREAD,
+				"Thread Starvation: task %s (%lx) was scheduled to pop greater than %us ago",
+				thread->xref->funcname,
+				(unsigned long)thread->func,
+				CONSUMED_TIME_CHECK / 1000000);
+		}
+#endif
 		thread_timer_list_pop(timers);
 		thread->type = THREAD_READY;
 		thread_list_add_tail(&thread->master->ready, thread);
@@ -1727,6 +1753,15 @@ void thread_call(struct thread *thread)
 		flog_warn(
 			EC_LIB_SLOW_THREAD,
 			"SLOW THREAD: task %s (%lx) ran for %lums (cpu time %lums)",
+			thread->xref->funcname, (unsigned long)thread->func,
+			realtime / 1000, cputime / 1000);
+	} else if ((realtime > cputime)
+		   && ((realtime - cputime) > (CONSUMED_TIME_CHECK / 2))) {
+		flog_warn(
+			EC_LIB_STARVE_THREAD,
+			"Thread Starvation: %lu %lu task %s (%lx) ran for %lums, but only used %lums cpu time",
+			realtime - cputime,
+			(unsigned long)CONSUMED_TIME_CHECK / 2,
 			thread->xref->funcname, (unsigned long)thread->func,
 			realtime / 1000, cputime / 1000);
 	}
