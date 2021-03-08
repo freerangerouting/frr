@@ -66,6 +66,14 @@ Certain signals have special meanings to *pimd*.
    prefix of group ranges covered. This command is vrf aware, to configure for
    a vrf, enter the vrf submode.
 
+.. index:: ip pim register-accept-list PLIST
+.. clicmd:: ip pim register-accept-list PLIST
+
+   When pim receives a register packet the source of the packet will be compared
+   to the prefix-list specified, PLIST, and if a permit is received normal
+   processing continues.  If a deny is returned for the source address of the
+   register packet a register stop message is sent to the source.
+
 .. index:: ip pim spt-switchover infinity-and-beyond
 .. clicmd:: ip pim spt-switchover infinity-and-beyond
 
@@ -158,12 +166,37 @@ Certain signals have special meanings to *pimd*.
    urib-only
       Lookup in the Unicast Rib only.
 
+.. index:: [no] ip msdp mesh-group [WORD]
+.. clicmd:: [no] ip msdp mesh-group [WORD]
+
+   Create or Delete a multicast source discovery protocol mesh-group using
+   [WORD] as the group name.
+
+.. index:: [no] ip msdp mesh-group WORD member A.B.C.D
+.. clicmd:: [no] ip msdp mesh-group WORD member A.B.C.D
+
+   Attach or Delete A.B.C.D to the MSDP mesh group WORD specified.
+
+.. index:: [no] ip msdp mesh-group WORD source A.B.C.D
+.. clicmd:: [no] ip msdp mesh-group WORD source A.B.C.D
+
+   For the address specified A.B.C.D use that as the source address for
+   mesh group packets being sent.
+
 .. index:: ip igmp generate-query-once [version (2-3)]
 .. clicmd:: ip igmp generate-query-once [version (2-3)]
 
    Generate IGMP query (v2/v3) on user requirement. This will not depend on
    the existing IGMP general query timer.If no version is provided in the cli,
    it will be considered as default v2 query.This is a hidden command.
+
+.. index:: [no] ip igmp watermark-warn (10-60000)
+.. clicmd:: [no] ip igmp watermark-warn (10-60000)
+
+   Configure watermark warning generation for an igmp group limit. Generates
+   warning once the configured group limit is reached while adding new groups.
+   'no' form of the command disables the warning generation. This command is
+   vrf aware. To configure per vrf, enter vrf submode.
 
 .. _pim-interface-configuration:
 
@@ -173,6 +206,13 @@ PIM Interface Configuration
 PIM interface commands allow you to configure an interface as either a Receiver
 or a interface that you would like to form pim neighbors on. If the interface
 is in a vrf, enter the interface command with the vrf keyword at the end.
+
+.. index:: ip pim active-active
+.. clicmd:: ip pim active-active
+
+   Turn on pim active-active configuration for a Vxlan interface.  This
+   command will not do anything if you do not have the underlying ability
+   of a mlag implementation.
 
 .. index:: ip pim bfd
 .. clicmd:: ip pim bfd
@@ -211,6 +251,13 @@ is in a vrf, enter the interface command with the vrf keyword at the end.
    over. Please note that this command does not enable the reception of IGMP
    reports on the interface. Refer to the next `ip igmp` command for IGMP
    management.
+
+.. index:: [no] ip pim use-source A.B.C.D
+.. clicmd:: [no] ip pim use-source A.B.C.D
+
+   If you have multiple addresses configured on a particular interface
+   and would like pim to use a specific source address associated with
+   that interface.
 
 .. index:: ip igmp
 .. clicmd:: ip igmp
@@ -350,17 +397,30 @@ cause great confusion.
    Source Group.  The keyword `fill` says to fill in all assumed data
    for test/data gathering purposes.
 
-.. index:: show ip mroute count
-.. clicmd:: show ip mroute count
+.. index:: show ip mroute [vrf NAME] count [json]
+.. clicmd:: show ip mroute [vrf NAME] count [json]
 
    Display information about installed into the kernel S,G mroutes and in
-   addition display data about packet flow for the mroutes.
+   addition display data about packet flow for the mroutes for a specific
+   vrf.
 
-.. index:: show ip mroute summary
-.. clicmd:: show ip mroute summary
+.. index:: show ip mroute vrf all count [json]
+.. clicmd:: show ip mroute vrf all count [json]
+
+   Display information about installed into the kernel S,G mroutes and in
+   addition display data about packet flow for the mroutes for all vrfs.
+
+.. index:: show ip mroute [vrf NAME] summary [json]
+.. clicmd:: show ip mroute [vrf NAME] summary [json]
 
    Display total number of S,G mroutes and number of S,G mroutes installed
-   into the kernel.
+   into the kernel for a specific vrf.
+
+.. index:: show ip mroute vrf all summary [json]
+.. clicmd:: show ip mroute vrf all summary [json]
+
+   Display total number of S,G mroutes and number of S,G mroutes
+   installed into the kernel for all vrfs.
 
 .. index:: show ip pim assert
 .. clicmd:: show ip pim assert
@@ -392,6 +452,11 @@ cause great confusion.
 
    Display information about interfaces PIM is using.
 
+.. index:: show ip pim mlag [vrf NAME] interface [detail|WORD] [json]
+.. clicmd:: show ip pim mlag [vrf NAME|all] interface [detail|WORD] [json]
+
+   Display mlag interface information.
+
 .. index:: show ip pim [vrf NAME] join [A.B.C.D [A.B.C.D]] [json]
 .. clicmd:: show ip pim join
 
@@ -403,6 +468,11 @@ cause great confusion.
 .. clicmd:: show ip pim local-membership
 
    Display information about PIM interface local-membership.
+
+.. index:: show ip pim mlag summary [json]
+.. clicmd:: show ip pim mlag summary [json]
+
+   Display mlag information state that PIM is keeping track of.
 
 .. index:: show ip pim neighbor
 .. clicmd:: show ip pim neighbor
@@ -461,6 +531,18 @@ cause great confusion.
 
    Display upstream information for S,G's and the RPF data associated with them.
 
+.. index:: show ip pim [vrf NAME] mlag upstream [A.B.C.D [A.B.C.D]] [json]
+.. clicmd:: show ip pim mlag upstream
+
+   Display upstream entries that are synced across MLAG switches.
+   Allow the user to specify sub Source and Groups address filters.
+
+.. index:: show ip pim mlag summary
+.. clicmd:: show ip pim mlag summary
+
+   Display PIM MLAG (multi-chassis link aggregation) session status and
+   control message statistics.
+
 .. index:: show ip pim bsr
 .. clicmd:: show ip pim bsr
 
@@ -485,6 +567,16 @@ cause great confusion.
 .. clicmd:: mtrace A.B.C.D [A.B.C.D]
 
    Display multicast traceroute towards source, optionally for particular group.
+
+.. index:: show ip multicast count [vrf NAME] [json]
+.. clicmd:: show ip multicast count [vrf NAME] [json]
+
+   Display multicast data packets count per interface for a vrf.
+
+.. index:: show ip multicast count vrf all [json]
+.. clicmd:: show ip multicast count vrf all [json]
+
+   Display multicast data packets count per interface for all vrf.
 
 PIM Debug Commands
 ==================

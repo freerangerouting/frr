@@ -61,8 +61,7 @@ static void ospf6_area_lsdb_hook_add(struct ospf6_lsa *lsa)
 	case OSPF6_LSTYPE_ROUTER:
 	case OSPF6_LSTYPE_NETWORK:
 		if (IS_OSPF6_DEBUG_EXAMIN_TYPE(lsa->header->type)) {
-			zlog_debug("%s Examin LSA %s", __PRETTY_FUNCTION__,
-				   lsa->name);
+			zlog_debug("%s Examin LSA %s", __func__, lsa->name);
 			zlog_debug(" Schedule SPF Calculation for %s",
 				   OSPF6_AREA(lsa->lsdb->data)->name);
 		}
@@ -157,7 +156,7 @@ static int ospf6_area_stub_set(struct ospf6 *ospf6, struct ospf6_area *area)
 		ospf6_area_stub_update(area);
 	}
 
-	return (1);
+	return 1;
 }
 
 static void ospf6_area_stub_unset(struct ospf6 *ospf6, struct ospf6_area *area)
@@ -379,22 +378,6 @@ void ospf6_area_show(struct vty *vty, struct ospf6_area *oa)
 	} else
 		vty_out(vty, "SPF has not been run\n");
 }
-
-
-#define OSPF6_CMD_AREA_GET(str, oa)                                            \
-	{                                                                      \
-		char *ep;                                                      \
-		uint32_t area_id = htonl(strtoul(str, &ep, 10));               \
-		if (*ep && inet_pton(AF_INET, str, &area_id) != 1) {           \
-			vty_out(vty, "Malformed Area-ID: %s\n", str);          \
-			return CMD_SUCCESS;                                    \
-		}                                                              \
-		int format = !*ep ? OSPF6_AREA_FMT_DECIMAL                     \
-				  : OSPF6_AREA_FMT_DOTTEDQUAD;                 \
-		oa = ospf6_area_lookup(area_id, ospf6);                        \
-		if (oa == NULL)                                                \
-			oa = ospf6_area_create(area_id, ospf6, format);        \
-	}
 
 DEFUN (area_range,
        area_range_cmd,

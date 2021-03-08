@@ -151,7 +151,9 @@ enum imsg_type {
 	IMSG_LOG,
 	IMSG_ACL_CHECK,
 	IMSG_INIT,
-	IMSG_PW_UPDATE
+	IMSG_PW_UPDATE,
+	IMSG_FILTER_UPDATE,
+	IMSG_NBR_SHUTDOWN
 };
 
 struct ldpd_init {
@@ -160,6 +162,11 @@ struct ldpd_init {
 	char		 ctl_sock_path[MAXPATHLEN];
 	char		 zclient_serv_path[MAXPATHLEN];
 	unsigned short instance;
+};
+
+struct ldp_access {
+	char			 name[ACL_NAMSIZ];
+	enum access_type	 type;
 };
 
 union ldpd_addr {
@@ -306,7 +313,7 @@ struct iface_af {
 struct iface {
 	RB_ENTRY(iface)		 entry;
 	char			 name[IF_NAMESIZE];
-	unsigned int		 ifindex;
+	ifindex_t		 ifindex;
 	struct if_addr_head	 addr_list;
 	struct in6_addr		 linklocal;
 	enum iface_type		 type;
@@ -391,7 +398,7 @@ struct l2vpn_if {
 	RB_ENTRY(l2vpn_if)	 entry;
 	struct l2vpn		*l2vpn;
 	char			 ifname[IF_NAMESIZE];
-	unsigned int		 ifindex;
+	ifindex_t		 ifindex;
 	int			 operative;
 	uint8_t			 mac[ETH_ALEN];
 	QOBJ_FIELDS
@@ -408,13 +415,14 @@ struct l2vpn_pw {
 	union ldpd_addr		 addr;
 	uint32_t		 pwid;
 	char			 ifname[IF_NAMESIZE];
-	unsigned int		 ifindex;
+	ifindex_t		 ifindex;
 	bool			 enabled;
 	uint32_t		 remote_group;
 	uint16_t		 remote_mtu;
 	uint32_t		 local_status;
 	uint32_t		 remote_status;
 	uint8_t			 flags;
+	uint8_t			 reason;
 	QOBJ_FIELDS
 };
 RB_HEAD(l2vpn_pw_head, l2vpn_pw);
@@ -426,6 +434,12 @@ DECLARE_QOBJ_TYPE(l2vpn_pw)
 #define F_PW_CWORD		0x08	/* control word negotiated */
 #define F_PW_STATIC_NBR_ADDR	0x10	/* static neighbor address configured */
 
+#define F_PW_NO_ERR             0x00	/* no error reported */
+#define F_PW_LOCAL_NOT_FWD      0x01	/* locally can't forward over PW */
+#define F_PW_REMOTE_NOT_FWD     0x02	/* remote end of PW reported fwd error*/
+#define F_PW_NO_REMOTE_LABEL    0x03	/* have not recvd label from peer */
+#define F_PW_MTU_MISMATCH       0x04	/* mtu mismatch between peers */
+
 struct l2vpn {
 	RB_ENTRY(l2vpn)		 entry;
 	char			 name[L2VPN_NAME_LEN];
@@ -433,7 +447,7 @@ struct l2vpn {
 	int			 pw_type;
 	int			 mtu;
 	char			 br_ifname[IF_NAMESIZE];
-	unsigned int		 br_ifindex;
+	ifindex_t		 br_ifindex;
 	struct l2vpn_if_head	 if_tree;
 	struct l2vpn_pw_head	 pw_tree;
 	struct l2vpn_pw_head	 pw_inactive_tree;
@@ -511,6 +525,8 @@ DECLARE_QOBJ_TYPE(ldpd_conf)
 #define	F_LDPD_NO_FIB_UPDATE	0x0001
 #define	F_LDPD_DS_CISCO_INTEROP	0x0002
 #define	F_LDPD_ENABLED		0x0004
+#define	F_LDPD_ORDERED_CONTROL  0x0008
+
 
 struct ldpd_af_global {
 	struct thread		*disc_ev;
@@ -542,7 +558,7 @@ struct kroute {
 	union ldpd_addr		 nexthop;
 	uint32_t		 local_label;
 	uint32_t		 remote_label;
-	unsigned short		 ifindex;
+	ifindex_t		 ifindex;
 	uint8_t			 route_type;
 	uint8_t			 route_instance;
 	uint16_t		 flags;
@@ -550,7 +566,7 @@ struct kroute {
 
 struct kaddr {
 	char			 ifname[IF_NAMESIZE];
-	unsigned short		 ifindex;
+	ifindex_t		 ifindex;
 	int			 af;
 	union ldpd_addr		 addr;
 	uint8_t			 prefixlen;
@@ -559,7 +575,7 @@ struct kaddr {
 
 struct kif {
 	char			 ifname[IF_NAMESIZE];
-	unsigned short		 ifindex;
+	ifindex_t		 ifindex;
 	int			 flags;
 	int			 operative;
 	uint8_t			 mac[ETH_ALEN];
@@ -577,7 +593,7 @@ struct acl_check {
 struct ctl_iface {
 	int			 af;
 	char			 name[IF_NAMESIZE];
-	unsigned int		 ifindex;
+	ifindex_t		 ifindex;
 	int			 state;
 	enum iface_type		 type;
 	uint16_t		 hello_holdtime;
@@ -653,6 +669,7 @@ struct ctl_pw {
 	uint16_t		 remote_ifmtu;
 	uint8_t			 remote_cword;
 	uint32_t		 status;
+	uint8_t			 reason;
 };
 
 extern struct ldpd_conf		*ldpd_conf, *vty_conf;
@@ -760,7 +777,7 @@ int		 sock_set_bindany(int, int);
 int		 sock_set_md5sig(int, int, union ldpd_addr *, const char *);
 int		 sock_set_ipv4_tos(int, int);
 int		 sock_set_ipv4_pktinfo(int, int);
-int		 sock_set_ipv4_recvdstaddr(int, int);
+int		 sock_set_ipv4_recvdstaddr(int fd, ifindex_t ifindex);
 int		 sock_set_ipv4_recvif(int, int);
 int		 sock_set_ipv4_minttl(int, int);
 int		 sock_set_ipv4_ucast_ttl(int fd, int);
@@ -783,7 +800,8 @@ struct fec;
 
 const char	*log_sockaddr(void *);
 const char	*log_in6addr(const struct in6_addr *);
-const char	*log_in6addr_scope(const struct in6_addr *, unsigned int);
+const char	*log_in6addr_scope(const struct in6_addr *addr,
+				   ifindex_t ifidx);
 const char	*log_addr(int, const union ldpd_addr *);
 char		*log_label(uint32_t);
 const char	*log_time(time_t);
@@ -798,6 +816,7 @@ const char	*if_type_name(enum iface_type);
 const char	*msg_name(uint16_t);
 const char	*status_code_name(uint32_t);
 const char	*pw_type_name(uint16_t);
+const char	*pw_error_code(uint8_t);
 
 /* quagga */
 extern struct thread_master	*master;

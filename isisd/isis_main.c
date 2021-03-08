@@ -39,6 +39,7 @@
 #include "vrf.h"
 #include "qobj.h"
 #include "libfrr.h"
+#include "routemap.h"
 
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
@@ -65,7 +66,7 @@
 #define FABRICD_VTY_PORT     2618
 
 /* isisd privileges */
-zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND};
+zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND, ZCAP_SYS_ADMIN};
 
 struct zebra_privs_t isisd_privs = {
 #if defined(FRR_USER)
@@ -82,7 +83,9 @@ struct zebra_privs_t isisd_privs = {
 	.cap_num_i = 0};
 
 /* isisd options */
-struct option longopts[] = {{0}};
+static const struct option longopts[] = {
+	{"int_num", required_argument, NULL, 'I'},
+	{0}};
 
 /* Master of threads. */
 struct thread_master *master;
@@ -98,6 +101,8 @@ void sigusr1(void);
 
 static __attribute__((__noreturn__)) void terminate(int i)
 {
+	isis_terminate();
+	isis_sr_term();
 	isis_zebra_stop();
 	exit(i);
 }
@@ -162,10 +167,13 @@ struct quagga_signal_t isisd_signals[] = {
 
 
 static const struct frr_yang_module_info *const isisd_yang_modules[] = {
+	&frr_filter_info,
 	&frr_interface_info,
 #ifndef FABRICD
 	&frr_isisd_info,
 #endif /* ifndef FABRICD */
+	&frr_route_map_info,
+	&frr_vrf_info,
 };
 
 #ifdef FABRICD
@@ -178,8 +186,7 @@ FRR_DAEMON_INFO(isisd, ISIS, .vty_port = ISISD_VTY_PORT,
 		.proghelp = "Implementation of the IS-IS routing protocol.",
 #endif
 		.copyright =
-			"Copyright (c) 2001-2002 Sampo Saaristo,"
-			" Ofer Wald and Hannes Gredler",
+			"Copyright (c) 2001-2002 Sampo Saaristo, Ofer Wald and Hannes Gredler",
 
 		.signals = isisd_signals,
 		.n_signals = array_size(isisd_signals),
@@ -193,13 +200,16 @@ FRR_DAEMON_INFO(isisd, ISIS, .vty_port = ISISD_VTY_PORT,
 int main(int argc, char **argv, char **envp)
 {
 	int opt;
+	int instance = 1;
 
 #ifdef FABRICD
 	frr_preinit(&fabricd_di, argc, argv);
 #else
 	frr_preinit(&isisd_di, argc, argv);
 #endif
-	frr_opt_add("", longopts, "");
+	frr_opt_add(
+		"I:", longopts,
+		"  -I, --int_num      Set instance number (label-manager)\n");
 
 	/* Command line argument treatment. */
 	while (1) {
@@ -211,6 +221,12 @@ int main(int argc, char **argv, char **envp)
 		switch (opt) {
 		case 0:
 			break;
+		case 'I':
+			instance = atoi(optarg);
+			if (instance < 1 || instance > (unsigned short)-1)
+				zlog_err("Instance %i out of range (1..%u)",
+					 instance, (unsigned short)-1);
+			break;
 		default:
 			frr_help_exit(1);
 			break;
@@ -218,14 +234,14 @@ int main(int argc, char **argv, char **envp)
 	}
 
 	/* thread master */
-	master = frr_init();
-
+	isis_master_init(frr_init());
+	master = im->master;
 	/*
 	 *  initializations
 	 */
 	isis_error_init();
 	access_list_init();
-	vrf_init(NULL, NULL, NULL, NULL, NULL);
+	isis_vrf_init();
 	prefix_list_init();
 	isis_init();
 	isis_circuit_init();
@@ -235,17 +251,18 @@ int main(int argc, char **argv, char **envp)
 #ifndef FABRICD
 	isis_cli_init();
 #endif /* ifdef FABRICD */
-	isis_spf_cmds_init();
+	isis_spf_init();
 	isis_redist_init();
 	isis_route_map_init();
 	isis_mpls_te_init();
+	isis_sr_init();
 	lsp_init();
 	mt_init();
 
 	/* create the global 'isis' instance */
-	isis_new(1, VRF_DEFAULT);
+	isis_global_instance_create(VRF_DEFAULT_NAME);
 
-	isis_zebra_init(master);
+	isis_zebra_init(master, instance);
 	isis_bfd_init();
 	fabricd_init();
 

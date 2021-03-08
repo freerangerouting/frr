@@ -165,14 +165,15 @@ extern int zebra_vxlan_svi_down(struct interface *ifp,
 extern int zebra_vxlan_handle_kernel_neigh_update(
 	struct interface *ifp, struct interface *link_if, struct ipaddr *ip,
 	struct ethaddr *macaddr, uint16_t state, bool is_ext,
-	bool is_router);
+	bool is_router, bool local_inactive, bool dp_static);
 extern int zebra_vxlan_handle_kernel_neigh_del(struct interface *ifp,
 				       struct interface *link_if,
 				       struct ipaddr *ip);
 extern int zebra_vxlan_local_mac_add_update(struct interface *ifp,
 					    struct interface *br_if,
 					    struct ethaddr *mac, vlanid_t vid,
-					    bool sticky);
+					    bool sticky, bool local_inactive,
+						bool dp_static);
 extern int zebra_vxlan_local_mac_del(struct interface *ifp,
 				     struct interface *br_if,
 				     struct ethaddr *mac, vlanid_t vid);
@@ -183,6 +184,8 @@ extern int zebra_vxlan_check_readd_remote_mac(struct interface *ifp,
 extern int zebra_vxlan_check_del_local_mac(struct interface *ifp,
 					   struct interface *br_if,
 					   struct ethaddr *mac, vlanid_t vid);
+extern int zebra_vxlan_check_readd_vtep(struct interface *ifp,
+					struct in_addr vtep_ip);
 extern int zebra_vxlan_if_up(struct interface *ifp);
 extern int zebra_vxlan_if_down(struct interface *ifp);
 extern int zebra_vxlan_if_add(struct interface *ifp);
@@ -197,29 +200,25 @@ extern void zebra_vxlan_cleanup_tables(struct zebra_vrf *);
 extern void zebra_vxlan_init(void);
 extern void zebra_vxlan_disable(void);
 extern void zebra_vxlan_evpn_vrf_route_add(vrf_id_t vrf_id,
-					   struct ethaddr *rmac,
-					   struct ipaddr *ip,
-					   struct prefix *host_prefix);
+					   const struct ethaddr *rmac,
+					   const struct ipaddr *ip,
+					   const struct prefix *host_prefix);
 extern void zebra_vxlan_evpn_vrf_route_del(vrf_id_t vrf_id,
 					   struct ipaddr *vtep_ip,
 					   struct prefix *host_prefix);
-extern int zebra_vxlan_clear_dup_detect_vni_mac(struct vty *vty,
-						struct zebra_vrf *zvrf,
+extern int zebra_vxlan_clear_dup_detect_vni_mac(struct zebra_vrf *zvrf,
 						vni_t vni,
 						struct ethaddr *macaddr);
-extern int zebra_vxlan_clear_dup_detect_vni_ip(struct vty *vty,
-					       struct zebra_vrf *zvrf,
+extern int zebra_vxlan_clear_dup_detect_vni_ip(struct zebra_vrf *zvrf,
 					       vni_t vni, struct ipaddr *ip);
-extern int zebra_vxlan_clear_dup_detect_vni_all(struct vty *vty,
-						struct zebra_vrf *zvrf);
-extern int zebra_vxlan_clear_dup_detect_vni(struct vty *vty,
-					    struct zebra_vrf *zvrf,
-					    vni_t vni);
+extern int zebra_vxlan_clear_dup_detect_vni_all(struct zebra_vrf *zvrf);
+extern int zebra_vxlan_clear_dup_detect_vni(struct zebra_vrf *zvrf, vni_t vni);
 extern void zebra_vxlan_handle_result(struct zebra_dplane_ctx *ctx);
 
 extern void zebra_evpn_init(void);
 extern void zebra_vxlan_macvlan_up(struct interface *ifp);
 extern void zebra_vxlan_macvlan_down(struct interface *ifp);
+extern int vni_list_cmp(void *p1, void *p2);
 
 #ifdef __cplusplus
 }

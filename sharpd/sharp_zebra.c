@@ -25,14 +25,9 @@
 #include "command.h"
 #include "network.h"
 #include "prefix.h"
-#include "routemap.h"
-#include "table.h"
 #include "stream.h"
 #include "memory.h"
 #include "zclient.h"
-#include "filter.h"
-#include "plist.h"
-#include "log.h"
 #include "nexthop.h"
 #include "nexthop_group.h"
 
@@ -46,7 +41,39 @@ struct zclient *zclient = NULL;
 /* For registering threads. */
 extern struct thread_master *master;
 
-/* Inteface addition message from zebra. */
+/* Privs info */
+extern struct zebra_privs_t sharp_privs;
+
+DEFINE_MTYPE_STATIC(SHARPD, ZC, "Test zclients");
+
+/* Struct to hold list of test zclients */
+struct sharp_zclient {
+	struct sharp_zclient *prev;
+	struct sharp_zclient *next;
+	struct zclient *client;
+};
+
+/* Head of test zclient list */
+static struct sharp_zclient *sharp_clients_head;
+
+static int sharp_opaque_handler(ZAPI_CALLBACK_ARGS);
+
+/* Utility to add a test zclient struct to the list */
+static void add_zclient(struct zclient *client)
+{
+	struct sharp_zclient *node;
+
+	node = XCALLOC(MTYPE_ZC, sizeof(struct sharp_zclient));
+
+	node->client = client;
+
+	node->next = sharp_clients_head;
+	if (sharp_clients_head)
+		sharp_clients_head->prev = node;
+	sharp_clients_head = node;
+}
+
+/* Interface addition message from zebra. */
 static int sharp_ifp_create(struct interface *ifp)
 {
 	return 0;
@@ -87,8 +114,112 @@ static int sharp_ifp_down(struct interface *ifp)
 	return 0;
 }
 
+int sharp_install_lsps_helper(bool install_p, bool update_p,
+			      const struct prefix *p, uint8_t type,
+			      int instance, uint32_t in_label,
+			      const struct nexthop_group *nhg,
+			      const struct nexthop_group *backup_nhg)
+{
+	struct zapi_labels zl = {};
+	struct zapi_nexthop *znh;
+	const struct nexthop *nh;
+	int i, cmd, ret;
+
+	zl.type = ZEBRA_LSP_SHARP;
+	zl.local_label = in_label;
+
+	if (p) {
+		SET_FLAG(zl.message, ZAPI_LABELS_FTN);
+		prefix_copy(&zl.route.prefix, p);
+		zl.route.type = type;
+		zl.route.instance = instance;
+	}
+
+	/* List of nexthops is optional for delete */
+	i = 0;
+	if (nhg) {
+		for (ALL_NEXTHOPS_PTR(nhg, nh)) {
+			znh = &zl.nexthops[i];
+
+			/* Must have labels to be useful */
+			if (nh->nh_label == NULL ||
+			    nh->nh_label->num_labels == 0)
+				continue;
+
+			if (nh->type == NEXTHOP_TYPE_IFINDEX ||
+			    nh->type == NEXTHOP_TYPE_BLACKHOLE)
+				/* Hmm - can't really deal with these types */
+				continue;
+
+			ret = zapi_nexthop_from_nexthop(znh, nh);
+			if (ret < 0)
+				return -1;
+
+			i++;
+			if (i >= MULTIPATH_NUM)
+				break;
+		}
+	}
+
+	/* Whoops - no nexthops isn't very useful for install */
+	if (i == 0 && install_p)
+		return -1;
+
+	zl.nexthop_num = i;
+
+	/* Add optional backup nexthop info. Since these are used by index,
+	 * we can't just skip over an invalid backup nexthop: we will
+	 * invalidate the entire operation.
+	 */
+	if (backup_nhg != NULL) {
+		i = 0;
+		for (ALL_NEXTHOPS_PTR(backup_nhg, nh)) {
+			znh = &zl.backup_nexthops[i];
+
+			/* Must have labels to be useful */
+			if (nh->nh_label == NULL ||
+			    nh->nh_label->num_labels == 0)
+				return -1;
+
+			if (nh->type == NEXTHOP_TYPE_IFINDEX ||
+			    nh->type == NEXTHOP_TYPE_BLACKHOLE)
+				/* Hmm - can't really deal with these types */
+				return -1;
+
+			ret = zapi_nexthop_from_nexthop(znh, nh);
+			if (ret < 0)
+				return -1;
+
+			i++;
+			if (i >= MULTIPATH_NUM)
+				break;
+		}
+
+		if (i > 0)
+			SET_FLAG(zl.message, ZAPI_LABELS_HAS_BACKUPS);
+
+		zl.backup_nexthop_num = i;
+	}
+
+
+	if (install_p) {
+		if (update_p)
+			cmd = ZEBRA_MPLS_LABELS_REPLACE;
+		else
+			cmd = ZEBRA_MPLS_LABELS_ADD;
+	} else {
+		cmd = ZEBRA_MPLS_LABELS_DELETE;
+	}
+
+	ret = zebra_send_mpls_labels(zclient, cmd, &zl);
+
+	return ret;
+}
+
 void sharp_install_routes_helper(struct prefix *p, vrf_id_t vrf_id,
-				 uint8_t instance, struct nexthop_group *nhg,
+				 uint8_t instance,
+				 const struct nexthop_group *nhg,
+				 const struct nexthop_group *backup_nhg,
 				 uint32_t routes)
 {
 	uint32_t temp, i;
@@ -102,9 +233,13 @@ void sharp_install_routes_helper(struct prefix *p, vrf_id_t vrf_id,
 	} else
 		temp = ntohl(p->u.val32[3]);
 
+	/* Only use backup route/nexthops if present */
+	if (backup_nhg && (backup_nhg->nexthop == NULL))
+		backup_nhg = NULL;
+
 	monotime(&sg.r.t_start);
 	for (i = 0; i < routes; i++) {
-		route_add(p, vrf_id, (uint8_t)instance, nhg);
+		route_add(p, vrf_id, (uint8_t)instance, nhg, backup_nhg);
 		if (v4)
 			p->u.prefix4.s_addr = htonl(++temp);
 		else
@@ -154,6 +289,7 @@ static void handle_repeated(bool installed)
 		sg.r.installed_routes = 0;
 		sharp_install_routes_helper(&p, sg.r.vrf_id, sg.r.inst,
 					    &sg.r.nhop_group,
+					    &sg.r.backup_nhop_group,
 					    sg.r.total_routes);
 	}
 }
@@ -221,8 +357,9 @@ void vrf_label_add(vrf_id_t vrf_id, afi_t afi, mpls_label_t label)
 	zclient_send_vrf_label(zclient, vrf_id, afi, label, ZEBRA_LSP_SHARP);
 }
 
-void route_add(struct prefix *p, vrf_id_t vrf_id,
-	       uint8_t instance, struct nexthop_group *nhg)
+void route_add(const struct prefix *p, vrf_id_t vrf_id,
+	       uint8_t instance, const struct nexthop_group *nhg,
+	       const struct nexthop_group *backup_nhg)
 {
 	struct zapi_route api;
 	struct zapi_nexthop *api_nh;
@@ -241,46 +378,28 @@ void route_add(struct prefix *p, vrf_id_t vrf_id,
 
 	for (ALL_NEXTHOPS_PTR(nhg, nh)) {
 		api_nh = &api.nexthops[i];
-		api_nh->vrf_id = nh->vrf_id;
-		api_nh->type = nh->type;
-		api_nh->weight = nh->weight;
 
-		switch (nh->type) {
-		case NEXTHOP_TYPE_IPV4:
-			api_nh->gate = nh->gate;
-			break;
-		case NEXTHOP_TYPE_IPV4_IFINDEX:
-			api_nh->gate = nh->gate;
-			api_nh->ifindex = nh->ifindex;
-			break;
-		case NEXTHOP_TYPE_IFINDEX:
-			api_nh->ifindex = nh->ifindex;
-			break;
-		case NEXTHOP_TYPE_IPV6:
-			memcpy(&api_nh->gate.ipv6, &nh->gate.ipv6, 16);
-			break;
-		case NEXTHOP_TYPE_IPV6_IFINDEX:
-			api_nh->ifindex = nh->ifindex;
-			memcpy(&api_nh->gate.ipv6, &nh->gate.ipv6, 16);
-			break;
-		case NEXTHOP_TYPE_BLACKHOLE:
-			api_nh->bh_type = nh->bh_type;
-			break;
-		}
-
-		if (nh->nh_label && nh->nh_label->num_labels > 0) {
-			int j;
-
-			SET_FLAG(api_nh->flags, ZAPI_NEXTHOP_FLAG_LABEL);
-
-			api_nh->label_num = nh->nh_label->num_labels;
-			for (j = 0; j < nh->nh_label->num_labels; j++)
-				api_nh->labels[j] = nh->nh_label->label[j];
-		}
+		zapi_nexthop_from_nexthop(api_nh, nh);
 
 		i++;
 	}
 	api.nexthop_num = i;
+
+	/* Include backup nexthops, if present */
+	if (backup_nhg && backup_nhg->nexthop) {
+		SET_FLAG(api.message, ZAPI_MESSAGE_BACKUP_NEXTHOPS);
+
+		i = 0;
+		for (ALL_NEXTHOPS_PTR(backup_nhg, nh)) {
+			api_nh = &api.backup_nexthops[i];
+
+			zapi_backup_nexthop_from_nexthop(api_nh, nh);
+
+			i++;
+		}
+
+		api.backup_nexthop_num = i;
+	}
 
 	zclient_route_send(ZEBRA_ROUTE_ADD, zclient, &api);
 }
@@ -318,14 +437,19 @@ void sharp_zebra_nexthop_watch(struct prefix *p, vrf_id_t vrf_id, bool import,
 	}
 
 	if (zclient_send_rnh(zclient, command, p, connected, vrf_id) < 0)
-		zlog_warn("%s: Failure to send nexthop to zebra",
-			  __PRETTY_FUNCTION__);
+		zlog_warn("%s: Failure to send nexthop to zebra", __func__);
 }
 
 static int sharp_debug_nexthops(struct zapi_route *api)
 {
 	int i;
 	char buf[PREFIX_STRLEN];
+
+	if (api->nexthop_num == 0) {
+		zlog_debug(
+			"        Not installed");
+		return 0;
+	}
 
 	for (i = 0; i < api->nexthop_num; i++) {
 		struct zapi_nexthop *znh = &api->nexthops[i];
@@ -334,7 +458,7 @@ static int sharp_debug_nexthops(struct zapi_route *api)
 		case NEXTHOP_TYPE_IPV4_IFINDEX:
 		case NEXTHOP_TYPE_IPV4:
 			zlog_debug(
-				"\tNexthop %s, type: %d, ifindex: %d, vrf: %d, label_num: %d",
+				"        Nexthop %s, type: %d, ifindex: %d, vrf: %d, label_num: %d",
 				inet_ntop(AF_INET, &znh->gate.ipv4.s_addr, buf,
 					  sizeof(buf)),
 				znh->type, znh->ifindex, znh->vrf_id,
@@ -343,18 +467,18 @@ static int sharp_debug_nexthops(struct zapi_route *api)
 		case NEXTHOP_TYPE_IPV6_IFINDEX:
 		case NEXTHOP_TYPE_IPV6:
 			zlog_debug(
-				"\tNexthop %s, type: %d, ifindex: %d, vrf: %d, label_num: %d",
+				"        Nexthop %s, type: %d, ifindex: %d, vrf: %d, label_num: %d",
 				inet_ntop(AF_INET6, &znh->gate.ipv6, buf,
 					  sizeof(buf)),
 				znh->type, znh->ifindex, znh->vrf_id,
 				znh->label_num);
 			break;
 		case NEXTHOP_TYPE_IFINDEX:
-			zlog_debug("\tNexthop IFINDEX: %d, ifindex: %d",
+			zlog_debug("        Nexthop IFINDEX: %d, ifindex: %d",
 				   znh->type, znh->ifindex);
 			break;
 		case NEXTHOP_TYPE_BLACKHOLE:
-			zlog_debug("\tNexthop blackhole");
+			zlog_debug("        Nexthop blackhole");
 			break;
 		}
 	}
@@ -367,8 +491,7 @@ static int sharp_nexthop_update(ZAPI_CALLBACK_ARGS)
 	struct zapi_route nhr;
 
 	if (!zapi_nexthop_update_decode(zclient->ibuf, &nhr)) {
-		zlog_warn("%s: Decode of update failed", __PRETTY_FUNCTION__);
-
+		zlog_err("%s: Decode of update failed", __func__);
 		return 0;
 	}
 
@@ -388,8 +511,7 @@ static int sharp_redistribute_route(ZAPI_CALLBACK_ARGS)
 	struct zapi_route api;
 
 	if (zapi_route_decode(zclient->ibuf, &api) < 0)
-		zlog_warn("%s: Decode of redistribute failed: %d",
-			  __PRETTY_FUNCTION__,
+		zlog_warn("%s: Decode of redistribute failed: %d", __func__,
 			  ZEBRA_REDISTRIBUTE_ROUTE_ADD);
 
 	zlog_debug("%s: %pFX (%s)", zserv_command_string(cmd),
@@ -400,7 +522,150 @@ static int sharp_redistribute_route(ZAPI_CALLBACK_ARGS)
 	return 0;
 }
 
-extern struct zebra_privs_t sharp_privs;
+/* Add a zclient with a specified session id, for testing. */
+int sharp_zclient_create(uint32_t session_id)
+{
+	struct zclient *client;
+	struct sharp_zclient *node;
+
+	/* Check for duplicates */
+	for (node = sharp_clients_head; node != NULL; node = node->next) {
+		if (node->client->session_id == session_id)
+			return -1;
+	}
+
+	client = zclient_new(master, &zclient_options_default);
+	client->sock = -1;
+	client->session_id = session_id;
+
+	zclient_init(client, ZEBRA_ROUTE_SHARP, 0, &sharp_privs);
+
+	/* Register handlers for messages we expect this session to see */
+	client->opaque_msg_handler = sharp_opaque_handler;
+
+	/* Enqueue on the list of test clients */
+	add_zclient(client);
+
+	return 0;
+}
+
+/* Delete one of the extra test zclients */
+int sharp_zclient_delete(uint32_t session_id)
+{
+	struct sharp_zclient *node;
+
+	/* Search for session */
+	for (node = sharp_clients_head; node != NULL; node = node->next) {
+		if (node->client->session_id == session_id) {
+			/* Dequeue from list */
+			if (node->next)
+				node->next->prev = node->prev;
+			if (node->prev)
+				node->prev->next = node->next;
+			if (node == sharp_clients_head)
+				sharp_clients_head = node->next;
+
+			/* Clean up zclient */
+			zclient_stop(node->client);
+			zclient_free(node->client);
+
+			/* Free memory */
+			XFREE(MTYPE_ZC, node);
+			break;
+		}
+	}
+
+	return 0;
+}
+
+/* Handler for opaque messages */
+static int sharp_opaque_handler(ZAPI_CALLBACK_ARGS)
+{
+	struct stream *s;
+	struct zapi_opaque_msg info;
+
+	s = zclient->ibuf;
+
+	if (zclient_opaque_decode(s, &info) != 0)
+		return -1;
+
+	zlog_debug("%s: [%u] received opaque type %u", __func__,
+		   zclient->session_id, info.type);
+
+	return 0;
+}
+
+/*
+ * Send OPAQUE messages, using subtype 'type'.
+ */
+void sharp_opaque_send(uint32_t type, uint32_t proto, uint32_t instance,
+		       uint32_t session_id, uint32_t count)
+{
+	uint8_t buf[32];
+	int ret;
+	uint32_t i;
+
+	/* Prepare a small payload */
+	for (i = 0; i < sizeof(buf); i++) {
+		if (type < 255)
+			buf[i] = type;
+		else
+			buf[i] = 255;
+	}
+
+	/* Send some messages - broadcast and unicast are supported */
+	for (i = 0; i < count; i++) {
+		if (proto == 0)
+			ret = zclient_send_opaque(zclient, type, buf,
+						  sizeof(buf));
+		else
+			ret = zclient_send_opaque_unicast(zclient, type, proto,
+							  instance, session_id,
+							  buf, sizeof(buf));
+		if (ret < 0) {
+			zlog_debug("%s: send_opaque() failed => %d",
+				   __func__, ret);
+			break;
+		}
+	}
+
+}
+
+/*
+ * Send OPAQUE registration messages, using subtype 'type'.
+ */
+void sharp_opaque_reg_send(bool is_reg, uint32_t proto, uint32_t instance,
+			   uint32_t session_id, uint32_t type)
+{
+	struct stream *s;
+
+	s = zclient->obuf;
+	stream_reset(s);
+
+	if (is_reg)
+		zclient_create_header(s, ZEBRA_OPAQUE_REGISTER, VRF_DEFAULT);
+	else
+		zclient_create_header(s, ZEBRA_OPAQUE_UNREGISTER, VRF_DEFAULT);
+
+	/* Send sub-type */
+	stream_putl(s, type);
+
+	/* Add zclient info */
+	stream_putc(s, proto);
+	stream_putw(s, instance);
+	stream_putl(s, session_id);
+
+	/* Put length at the first point of the stream. */
+	stream_putw_at(s, 0, stream_get_endp(s));
+
+	(void)zclient_send_message(zclient);
+
+}
+
+void sharp_zebra_send_arp(const struct interface *ifp, const struct prefix *p)
+{
+	zclient_send_neigh_discovery_req(zclient, ifp, p);
+}
 
 void sharp_zebra_init(void)
 {
@@ -421,4 +686,5 @@ void sharp_zebra_init(void)
 
 	zclient->redistribute_route_add = sharp_redistribute_route;
 	zclient->redistribute_route_del = sharp_redistribute_route;
+	zclient->opaque_msg_handler = sharp_opaque_handler;
 }

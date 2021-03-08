@@ -90,12 +90,11 @@ int getsockopt_so_recvbuf(const int sock)
 static void *getsockopt_cmsg_data(struct msghdr *msgh, int level, int type)
 {
 	struct cmsghdr *cmsg;
-	void *ptr = NULL;
 
 	for (cmsg = CMSG_FIRSTHDR(msgh); cmsg != NULL;
 	     cmsg = CMSG_NXTHDR(msgh, cmsg))
 		if (cmsg->cmsg_level == level && cmsg->cmsg_type == type)
-			return (ptr = CMSG_DATA(cmsg));
+			return CMSG_DATA(cmsg);
 
 	return NULL;
 }
@@ -265,8 +264,7 @@ int setsockopt_ipv4_multicast(int sock, int optname, struct in_addr if_addr,
 		 * up */
 		char buf[1][INET_ADDRSTRLEN];
 		zlog_info(
-			"setsockopt_ipv4_multicast attempting to drop and "
-			"re-add (fd %d, mcast %s, ifindex %u)",
+			"setsockopt_ipv4_multicast attempting to drop and re-add (fd %d, mcast %s, ifindex %u)",
 			sock, inet_ntop(AF_INET, &mreqn.imr_multiaddr, buf[0],
 					sizeof(buf[0])),
 			ifindex);
@@ -307,8 +305,7 @@ int setsockopt_ipv4_multicast(int sock, int optname, struct in_addr if_addr,
 		 * up */
 		char buf[1][INET_ADDRSTRLEN];
 		zlog_info(
-			"setsockopt_ipv4_multicast attempting to drop and "
-			"re-add (fd %d, mcast %s, ifindex %u)",
+			"setsockopt_ipv4_multicast attempting to drop and re-add (fd %d, mcast %s, ifindex %u)",
 			sock, inet_ntop(AF_INET, &mreq.imr_multiaddr, buf[0],
 					sizeof(buf[0])),
 			ifindex);
@@ -537,10 +534,8 @@ ifindex_t getsockopt_ifindex(int af, struct msghdr *msgh)
 	switch (af) {
 	case AF_INET:
 		return (getsockopt_ipv4_ifindex(msgh));
-		break;
 	case AF_INET6:
 		return (getsockopt_ipv6_ifindex(msgh));
-		break;
 	default:
 		flog_err(EC_LIB_DEVELOPMENT,
 			 "getsockopt_ifindex: unknown address family %d", af);
@@ -686,7 +681,7 @@ int sockopt_tcp_signature_ext(int sock, union sockunion *su, uint16_t prefixlen,
 #endif /* GNU_LINUX */
 
 	if ((ret = setsockopt(sock, IPPROTO_TCP, optname, &md5sig,
-			      sizeof md5sig))
+			      sizeof(md5sig)))
 	    < 0) {
 		/* ENOENT is harmless.  It is returned when we clear a password
 		   for which

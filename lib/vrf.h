@@ -52,6 +52,9 @@ enum { IFLA_VRF_UNSPEC, IFLA_VRF_TABLE, __IFLA_VRF_MAX };
 #define VRF_ALL_CMD_HELP_STR    "Specify the VRF\nAll VRFs\n"
 #define VRF_FULL_CMD_HELP_STR   "Specify the VRF\nThe VRF name\nAll VRFs\n"
 
+#define FRR_VRF_XPATH "/frr-vrf:lib/vrf"
+#define FRR_VRF_KEY_XPATH "/frr-vrf:lib/vrf[name='%s']"
+
 /*
  * Pass some OS specific data up through
  * to the daemons
@@ -101,9 +104,12 @@ RB_PROTOTYPE(vrf_name_head, vrf, name_entry, vrf_name_compare)
 DECLARE_QOBJ_TYPE(vrf)
 
 /* Allow VRF with netns as backend */
-#define VRF_BACKEND_VRF_LITE   0
-#define VRF_BACKEND_NETNS      1
-#define VRF_BACKEND_UNKNOWN    2
+enum vrf_backend_type {
+	VRF_BACKEND_VRF_LITE,
+	VRF_BACKEND_NETNS,
+	VRF_BACKEND_UNKNOWN,
+	VRF_BACKEND_MAX,
+};
 
 extern struct vrf_id_head vrfs_by_id;
 extern struct vrf_name_head vrfs_by_name;
@@ -113,6 +119,8 @@ extern struct vrf *vrf_lookup_by_name(const char *);
 extern struct vrf *vrf_get(vrf_id_t, const char *);
 extern const char *vrf_id_to_name(vrf_id_t vrf_id);
 extern vrf_id_t vrf_name_to_id(const char *);
+
+#define VRF_LOGNAME(V) V ? V->name : "Unknown"
 
 #define VRF_GET_ID(V, NAME, USE_JSON)                                          \
 	do {                                                                   \
@@ -257,12 +265,8 @@ extern int vrf_getaddrinfo(const char *node, const char *service,
 
 extern int vrf_ioctl(vrf_id_t vrf_id, int d, unsigned long request, char *args);
 
-/* function called by macro VRF_DEFAULT
- * to get the default VRF_ID
- */
-extern vrf_id_t vrf_get_default_id(void);
 /* The default VRF ID */
-#define VRF_DEFAULT vrf_get_default_id()
+#define VRF_DEFAULT 0
 
 extern void vrf_set_default_name(const char *default_name, bool force);
 extern const char *vrf_get_default_name(void);
@@ -290,10 +294,10 @@ extern void vrf_install_commands(void);
  * VRF utilities
  */
 
-/* API for configuring VRF backend
- * should be called from zebra only
+/*
+ * API for configuring VRF backend
  */
-extern void vrf_configure_backend(int vrf_backend_netns);
+extern int vrf_configure_backend(enum vrf_backend_type backend);
 extern int vrf_get_backend(void);
 extern int vrf_is_backend_netns(void);
 
@@ -310,7 +314,7 @@ extern int vrf_handler_create(struct vty *vty, const char *name,
  */
 extern int vrf_netns_handler_create(struct vty *vty, struct vrf *vrf,
 				    char *pathname, ns_id_t ext_ns_id,
-				    ns_id_t ns_id);
+				    ns_id_t ns_id, ns_id_t rel_def_ns_id);
 
 /* used internally to enable or disable VRF.
  * Notify a change in the VRF ID of the VRF
@@ -319,6 +323,8 @@ extern void vrf_disable(struct vrf *vrf);
 extern int vrf_enable(struct vrf *vrf);
 extern void vrf_delete(struct vrf *vrf);
 extern vrf_id_t vrf_generate_id(void);
+
+extern const struct frr_yang_module_info frr_vrf_info;
 
 #ifdef __cplusplus
 }

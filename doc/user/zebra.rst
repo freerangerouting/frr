@@ -663,7 +663,7 @@ kernel.
 .. clicmd:: ip protocol PROTOCOL route-map ROUTEMAP
 
    Apply a route-map filter to routes for the specified protocol. PROTOCOL can
-   be: 
+   be:
 
    - any,
    - babel,
@@ -708,6 +708,24 @@ that sets the preferred source address, and applies the route-map to all
 
    ip protocol rip route-map RM1
 
+IPv6 example for OSPFv3.
+
+.. code-block:: frr
+
+   ipv6 prefix-list ANY seq 10 permit any
+   route-map RM6 permit 10
+       match ipv6 address prefix-list ANY
+       set src 2001:db8:425:1000::3
+
+   ipv6 protocol ospf6 route-map RM6
+
+
+.. note::
+
+   For both IPv4 and IPv6, the IP address has to exist at the point the
+   route-map is created.  Be wary of race conditions if the interface is
+   not created at startup.  On Debian, FRR might start before ifupdown
+   completes. Consider a reboot test.
 
 .. _zebra-fib-push-interface:
 
@@ -736,43 +754,30 @@ these cases, the FIB needs to be maintained reliably in the fast path
 as well. We refer to the component that programs the forwarding plane
 (directly or indirectly) as the Forwarding Plane Manager or FPM.
 
-The FIB push interface comprises of a TCP connection between zebra and
-the FPM. The connection is initiated by zebra -- that is, the FPM acts
-as the TCP server.
-
 .. program:: configure
 
 The relevant zebra code kicks in when zebra is configured with the
-:option:`--enable-fpm` flag. Zebra periodically attempts to connect to
-the well-known FPM port. Once the connection is up, zebra starts
-sending messages containing routes over the socket to the FPM. Zebra
-sends a complete copy of the forwarding table to the FPM, including
-routes that it may have picked up from the kernel. The existing
-interaction of zebra with the kernel remains unchanged -- that is, the
-kernel continues to receive FIB updates as before.
+:option:`--enable-fpm` flag and started with the module (``-M fpm``
+or ``-M dplane_fpm_nl``).
 
-The encapsulation header for the messages exchanged with the FPM is
-defined by the file :file:`fpm/fpm.h` in the frr tree. The routes
-themselves are encoded in Netlink or protobuf format, with Netlink
-being the default.
+.. note::
 
-Protobuf is one of a number of new serialization formats wherein the
-message schema is expressed in a purpose-built language. Code for
-encoding/decoding to/from the wire format is generated from the
-schema. Protobuf messages can be extended easily while maintaining
-backward-compatibility with older code. Protobuf has the following
-advantages over Netlink:
+   The ``fpm`` implementation attempts to connect to ``127.0.0.1`` port ``2620``
+   by default without configurations. The ``dplane_fpm_nl`` only attempts to
+   connect to a server if configured.
 
-- Code for serialization/deserialization is generated automatically. This
-  reduces the likelihood of bugs, allows third-party programs to be integrated
-  quickly, and makes it easy to add fields.
-- The message format is not tied to an OS (Linux), and can be evolved
-  independently.
+Zebra periodically attempts to connect to the well-known FPM port (``2620``).
+Once the connection is up, zebra starts sending messages containing routes
+over the socket to the FPM. Zebra sends a complete copy of the forwarding
+table to the FPM, including routes that it may have picked up from the kernel.
+The existing interaction of zebra with the kernel remains unchanged -- that
+is, the kernel continues to receive FIB updates as before.
 
-As mentioned before, zebra encodes routes sent to the FPM in Netlink
-format by default. The format can be controlled via the FPM module's
-load-time option to zebra, which currently takes the values `Netlink`
-and `protobuf`.
+The default FPM message format is netlink, however it can be controlled
+with the module load-time option. The modules accept the following options:
+
+- ``fpm``: ``netlink`` and ``protobuf``.
+- ``dplane_fpm_nl``: none, it only implements netlink.
 
 The zebra FPM interface uses replace semantics. That is, if a 'route
 add' message for a prefix is followed by another 'route add' message,
@@ -781,6 +786,135 @@ replaces the information sent in the first message.
 
 If the connection to the FPM goes down for some reason, zebra sends
 the FPM a complete copy of the forwarding table(s) when it reconnects.
+
+For more details on the implementation, please read the developer's manual FPM
+section.
+
+FPM Commands
+============
+
+``fpm`` implementation
+----------------------
+
+.. index:: fpm connection ip A.B.C.D port (1-65535)
+.. clicmd:: fpm connection ip A.B.C.D port (1-65535)
+
+   Configure ``zebra`` to connect to a different FPM server than
+   ``127.0.0.1`` port ``2620``.
+
+
+.. index:: no fpm connection ip A.B.C.D port (1-65535)
+.. clicmd:: no fpm connection ip A.B.C.D port (1-65535)
+
+  Configure ``zebra`` to connect to the default FPM server at ``127.0.0.1``
+  port ``2620``.
+
+
+.. index:: show zebra fpm stats
+.. clicmd:: show zebra fpm stats
+
+   Shows the FPM statistics.
+
+   Sample output:
+
+   ::
+
+       Counter                                       Total     Last 10 secs
+
+       connect_calls                                     3                2
+       connect_no_sock                                   0                0
+       read_cb_calls                                     2                2
+       write_cb_calls                                    2                0
+       write_calls                                       1                0
+       partial_writes                                    0                0
+       max_writes_hit                                    0                0
+       t_write_yields                                    0                0
+       nop_deletes_skipped                               6                0
+       route_adds                                        5                0
+       route_dels                                        0                0
+       updates_triggered                                11                0
+       redundant_triggers                                0                0
+       dests_del_after_update                            0                0
+       t_conn_down_starts                                0                0
+       t_conn_down_dests_processed                       0                0
+       t_conn_down_yields                                0                0
+       t_conn_down_finishes                              0                0
+       t_conn_up_starts                                  1                0
+       t_conn_up_dests_processed                        11                0
+       t_conn_up_yields                                  0                0
+       t_conn_up_aborts                                  0                0
+       t_conn_up_finishes                                1                0
+
+
+.. index:: clear zebra fpm stats
+.. clicmd:: clear zebra fpm stats
+
+   Reset statistics related to the zebra code that interacts with the
+   optional Forwarding Plane Manager (FPM) component.
+
+
+``dplane_fpm_nl`` implementation
+--------------------------------
+
+.. index:: fpm address <A.B.C.D|X:X::X:X> [port (1-65535)]
+.. clicmd:: fpm address <A.B.C.D|X:X::X:X> [port (1-65535)]
+
+   Configures the FPM server address. Once configured ``zebra`` will attempt
+   to connect to it immediately.
+
+
+.. index:: no fpm address [<A.B.C.D|X:X::X:X> [port (1-65535)]]
+.. clicmd:: no fpm address [<A.B.C.D|X:X::X:X> [port (1-65535)]]
+
+   Disables FPM entirely. ``zebra`` will close any current connections and
+   will not attempt to connect to it anymore.
+
+
+.. index:: fpm use-next-hop-groups
+.. clicmd:: fpm use-next-hop-groups
+
+   Use the new netlink messages ``RTM_NEWNEXTHOP`` / ``RTM_DELNEXTHOP`` to
+   group repeated route next hop information.
+
+
+.. index:: no fpm use-next-hop-groups
+.. clicmd:: no fpm use-next-hop-groups
+
+   Use the old known FPM behavior of including next hop information in the
+   route (e.g. ``RTM_NEWROUTE``) messages.
+
+
+.. index:: show fpm counters [json]
+.. clicmd:: show fpm counters [json]
+
+   Show the FPM statistics (plain text or JSON formatted).
+
+   Sample output:
+
+   ::
+
+                        FPM counters
+                        ============
+                       Input bytes: 0
+                      Output bytes: 308
+        Output buffer current size: 0
+           Output buffer peak size: 308
+                 Connection closes: 0
+                 Connection errors: 0
+        Data plane items processed: 0
+         Data plane items enqueued: 0
+       Data plane items queue peak: 0
+                  Buffer full hits: 0
+           User FPM configurations: 1
+         User FPM disable requests: 0
+
+
+.. index:: clear fpm counters
+.. clicmd:: clear fpm counters
+
+   Reset statistics related to the zebra code that interacts with the
+   optional Forwarding Plane Manager (FPM) component.
+
 
 .. _zebra-dplane:
 
@@ -865,15 +999,15 @@ zebra Terminal Mode Commands
 .. index:: show ip protocol
 .. clicmd:: show ip protocol
 
-.. index:: show ipforward
-.. clicmd:: show ipforward
+.. index:: show ip forward
+.. clicmd:: show ip forward
 
    Display whether the host's IP forwarding function is enabled or not.
    Almost any UNIX kernel can be configured with IP forwarding disabled.
    If so, the box can't work as a router.
 
-.. index:: show ipv6forward
-.. clicmd:: show ipv6forward
+.. index:: show ipv6 forward
+.. clicmd:: show ipv6 forward
 
    Display whether the host's IP v6 forwarding is enabled or not.
 
@@ -899,18 +1033,6 @@ zebra Terminal Mode Commands
    total number of route nodes in the table.  Which will be higher than
    the actual number of routes that are held.
 
-.. index:: show zebra fpm stats
-.. clicmd:: show zebra fpm stats
-
-   Display statistics related to the zebra code that interacts with the
-   optional Forwarding Plane Manager (FPM) component.
-
-.. index:: clear zebra fpm stats
-.. clicmd:: clear zebra fpm stats
-
-   Reset statistics related to the zebra code that interacts with the
-   optional Forwarding Plane Manager (FPM) component.
-
 .. index:: show nexthop-group rib [ID] [vrf NAME] [singleton [ip|ip6]]
 .. clicmd:: show nexthop-group rib [ID] [vrf NAME]
 
@@ -928,14 +1050,34 @@ Many routing protocols require a router-id to be configured. To have a
 consistent router-id across all daemons, the following commands are available
 to configure and display the router-id:
 
-.. index:: [no] router-id A.B.C.D [vrf NAME]
-.. clicmd:: [no] router-id A.B.C.D [vrf NAME]
+.. index:: [no] [ip] router-id A.B.C.D
+.. clicmd:: [no] [ip] router-id A.B.C.D
 
-   Configure the router-id of this router.
+   Allow entering of the router-id.  This command also works under the
+   vrf subnode, to allow router-id's per vrf.
 
-.. index:: show router-id [vrf NAME]
-.. clicmd:: show router-id [vrf NAME]
+.. index:: [no] [ip] router-id A.B.C.D vrf NAME
+.. clicmd:: [no] [ip] router-id A.B.C.D vrf NAME
+
+   Configure the router-id of this router from the configure NODE.
+   A show run of this command will display the router-id command
+   under the vrf sub node.  This command is deprecated and will
+   be removed at some point in time in the future.
+
+.. index:: show [ip] router-id [vrf NAME]
+.. clicmd:: show [ip] router-id [vrf NAME]
 
    Display the user configured router-id.
 
+For protocols requiring an IPv6 router-id, the following commands are available:
 
+.. index:: [no] ipv6 router-id X:X::X:X
+.. clicmd:: [no] ipv6 router-id X:X::X:X
+
+   Configure the IPv6 router-id of this router. Like its IPv4 counterpart,
+   this command works under the vrf subnode, to allow router-id's per vrf.
+
+.. index:: show ipv6 router-id [vrf NAME]
+.. clicmd:: show ipv6 router-id [vrf NAME]
+
+   Display the user configured IPv6 router-id.

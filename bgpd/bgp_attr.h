@@ -24,6 +24,7 @@
 #include "mpls.h"
 #include "bgp_attr_evpn.h"
 #include "bgpd/bgp_encap_types.h"
+#include "srte.h"
 
 /* Simple bit mapping. */
 #define BITMAP_NBBY 8
@@ -62,12 +63,15 @@
 #define BGP_PREFIX_SID_LABEL_INDEX     1
 #define BGP_PREFIX_SID_IPV6            2
 #define BGP_PREFIX_SID_ORIGINATOR_SRGB 3
+#define BGP_PREFIX_SID_VPN_SID 4
 #define BGP_PREFIX_SID_SRV6_L3_SERVICE 5
 #define BGP_PREFIX_SID_SRV6_L2_SERVICE 6
 
 #define BGP_PREFIX_SID_LABEL_INDEX_LENGTH      7
 #define BGP_PREFIX_SID_IPV6_LENGTH            19
 #define BGP_PREFIX_SID_ORIGINATOR_SRGB_LENGTH  6
+#define BGP_PREFIX_SID_VPN_SID_LENGTH         19
+#define BGP_PREFIX_SID_SRV6_L3_SERVICE_LENGTH 21
 
 #define BGP_ATTR_NH_AFI(afi, attr) \
 	((afi != AFI_L2VPN) ? afi : \
@@ -84,7 +88,7 @@ struct bgp_attr_encap_subtlv {
 	uint8_t value[0]; /* will be extended */
 };
 
-#if ENABLE_BGP_VNC
+#ifdef ENABLE_BGP_VNC
 /*
  * old rfp<->rfapi representation
  */
@@ -109,6 +113,29 @@ enum pta_type {
 	PMSI_TNLTYPE_INGR_REPL,
 	PMSI_TNLTYPE_MLDP_MP2MP,
 	PMSI_TNLTYPE_MAX = PMSI_TNLTYPE_MLDP_MP2MP
+};
+
+/*
+ * Prefix-SID type-4
+ * SRv6-VPN-SID-TLV
+ * draft-dawra-idr-srv6-vpn-04
+ */
+struct bgp_attr_srv6_vpn {
+	unsigned long refcnt;
+	uint8_t sid_flags;
+	struct in6_addr sid;
+};
+
+/*
+ * Prefix-SID type-5
+ * SRv6-L3VPN-Service-TLV
+ * draft-dawra-idr-srv6-vpn-05
+ */
+struct bgp_attr_srv6_l3vpn {
+	unsigned long refcnt;
+	uint8_t sid_flags;
+	uint16_t endpoint_behavior;
+	struct in6_addr sid;
 };
 
 /* BGP core attribute structure. */
@@ -151,6 +178,9 @@ struct attr {
 	/* Extended Communities attribute. */
 	struct ecommunity *ecommunity;
 
+	/* Extended Communities attribute. */
+	struct ecommunity *ipv6_ecommunity;
+
 	/* Large Communities attribute. */
 	struct lcommunity *lcommunity;
 
@@ -189,6 +219,30 @@ struct attr {
 	/* NA router flag (R-bit) support in EVPN */
 	uint8_t router_flag;
 
+	/* ES info */
+	uint8_t es_flags;
+	/* Path is not "locally-active" on the advertising VTEP. This is
+	 * translated into an ARP-ND ECOM.
+	 */
+#define ATTR_ES_PROXY_ADVERT (1 << 0)
+	/* Destination ES is present locally. This flag is set on local
+	 * paths and sync paths
+	 */
+#define ATTR_ES_IS_LOCAL (1 << 1)
+	/* There are one or more non-best paths from ES peers. Note that
+	 * this flag is only set on the local MAC-IP paths in the VNI
+	 * route table (not set in the global routing table). And only
+	 * non-proxy advertisements from an ES peer can result in this
+	 * flag being set.
+	 */
+#define ATTR_ES_PEER_ACTIVE (1 << 2)
+	/* There are one or more non-best proxy paths from ES peers */
+#define ATTR_ES_PEER_PROXY (1 << 3)
+	/* An ES peer has router bit set - only applicable if
+	 * ATTR_ES_PEER_ACTIVE is set
+	 */
+#define ATTR_ES_PEER_ROUTER (1 << 4)
+
 	/* route tag */
 	route_tag_t tag;
 
@@ -198,10 +252,16 @@ struct attr {
 	/* MPLS label */
 	mpls_label_t label;
 
+	/* SRv6 VPN SID */
+	struct bgp_attr_srv6_vpn *srv6_vpn;
+
+	/* SRv6 L3VPN SID */
+	struct bgp_attr_srv6_l3vpn *srv6_l3vpn;
+
 	uint16_t encap_tunneltype;		     /* grr */
 	struct bgp_attr_encap_subtlv *encap_subtlvs; /* rfc5512 */
 
-#if ENABLE_BGP_VNC
+#ifdef ENABLE_BGP_VNC
 	struct bgp_attr_encap_subtlv *vnc_subtlvs; /* VNC-specific */
 #endif
 	/* EVPN */
@@ -209,6 +269,13 @@ struct attr {
 
 	/* EVPN MAC Mobility sequence number, if any. */
 	uint32_t mm_seqnum;
+	/* highest MM sequence number rxed in a MAC-IP route from an
+	 * ES peer (this includes both proxy and non-proxy MAC-IP
+	 * advertisements from ES peers).
+	 * This is only applicable to local paths in the VNI routing
+	 * table and derived from other imported/non-best paths.
+	 */
+	uint32_t mm_sync_seqnum;
 
 	/* EVPN local router-mac */
 	struct ethaddr rmac;
@@ -218,6 +285,15 @@ struct attr {
 
 	/* rmap set table */
 	uint32_t rmap_table_id;
+
+	/* Link bandwidth value, if any. */
+	uint32_t link_bw;
+
+	/* EVPN ES */
+	esi_t esi;
+
+	/* SR-TE Color */
+	uint32_t srte_color;
 };
 
 /* rmap_change_flags definition */
@@ -228,6 +304,7 @@ struct attr {
 #define BATTR_RMAP_IPV6_GLOBAL_NHOP_CHANGED (1 << 4)
 #define BATTR_RMAP_IPV6_LL_NHOP_CHANGED (1 << 5)
 #define BATTR_RMAP_IPV6_PREFER_GLOBAL_CHANGED (1 << 6)
+#define BATTR_RMAP_LINK_BW_SET (1 << 7)
 
 /* Router Reflector related structure. */
 struct cluster_list {
@@ -278,22 +355,19 @@ extern void bgp_attr_unintern_sub(struct attr *);
 extern void bgp_attr_unintern(struct attr **);
 extern void bgp_attr_flush(struct attr *);
 extern struct attr *bgp_attr_default_set(struct attr *attr, uint8_t);
-extern struct attr *bgp_attr_aggregate_intern(struct bgp *bgp, uint8_t origin,
-					      struct aspath *aspath,
-					      struct community *community,
-					      struct ecommunity *ecommunity,
-					      struct lcommunity *lcommunity,
-					      struct bgp_aggregate *aggregate,
-					      uint8_t atomic_aggregate,
-					      struct prefix *p);
+extern struct attr *bgp_attr_aggregate_intern(
+	struct bgp *bgp, uint8_t origin, struct aspath *aspath,
+	struct community *community, struct ecommunity *ecommunity,
+	struct lcommunity *lcommunity, struct bgp_aggregate *aggregate,
+	uint8_t atomic_aggregate, const struct prefix *p);
 extern bgp_size_t bgp_packet_attribute(struct bgp *bgp, struct peer *,
 				       struct stream *, struct attr *,
 				       struct bpacket_attr_vec_arr *vecarr,
 				       struct prefix *, afi_t, safi_t,
 				       struct peer *, struct prefix_rd *,
 				       mpls_label_t *, uint32_t, int, uint32_t);
-extern void bgp_dump_routes_attr(struct stream *, struct attr *,
-				 struct prefix *);
+extern void bgp_dump_routes_attr(struct stream *s, struct attr *attr,
+				 const struct prefix *p);
 extern bool attrhash_cmp(const void *arg1, const void *arg2);
 extern unsigned int attrhash_key_make(const void *);
 extern void attr_show_all(struct vty *);
@@ -301,8 +375,7 @@ extern unsigned long int attr_count(void);
 extern unsigned long int attr_unknown_count(void);
 
 /* Cluster list prototypes. */
-extern int cluster_loop_check(struct cluster_list *, struct in_addr);
-extern void cluster_unintern(struct cluster_list *);
+extern bool cluster_loop_check(struct cluster_list *, struct in_addr);
 
 /* Below exported for unit-test purposes only */
 struct bgp_attr_parser_args {
@@ -319,8 +392,7 @@ extern int bgp_mp_reach_parse(struct bgp_attr_parser_args *args,
 extern int bgp_mp_unreach_parse(struct bgp_attr_parser_args *args,
 				struct bgp_nlri *);
 extern bgp_attr_parse_ret_t
-bgp_attr_prefix_sid(struct bgp_attr_parser_args *args,
-		    struct bgp_nlri *mp_update);
+bgp_attr_prefix_sid(struct bgp_attr_parser_args *args);
 
 extern struct bgp_attr_encap_subtlv *
 encap_tlv_dup(struct bgp_attr_encap_subtlv *orig);
@@ -341,20 +413,21 @@ extern size_t bgp_packet_mpattr_start(struct stream *s, struct peer *peer,
 				      struct bpacket_attr_vec_arr *vecarr,
 				      struct attr *attr);
 extern void bgp_packet_mpattr_prefix(struct stream *s, afi_t afi, safi_t safi,
-				     struct prefix *p, struct prefix_rd *prd,
+				     const struct prefix *p,
+				     const struct prefix_rd *prd,
 				     mpls_label_t *label, uint32_t num_labels,
 				     int addpath_encode, uint32_t addpath_tx_id,
 				     struct attr *);
 extern size_t bgp_packet_mpattr_prefix_size(afi_t afi, safi_t safi,
-					    struct prefix *p);
+					    const struct prefix *p);
 extern void bgp_packet_mpattr_end(struct stream *s, size_t sizep);
 
 extern size_t bgp_packet_mpunreach_start(struct stream *s, afi_t afi,
 					 safi_t safi);
-extern void bgp_packet_mpunreach_prefix(struct stream *s, struct prefix *p,
-					afi_t afi, safi_t safi,
-					struct prefix_rd *prd, mpls_label_t *,
-					uint32_t, int, uint32_t, struct attr *);
+extern void bgp_packet_mpunreach_prefix(
+	struct stream *s, const struct prefix *p, afi_t afi, safi_t safi,
+	const struct prefix_rd *prd, mpls_label_t *label, uint32_t num_labels,
+	int addpath_encode, uint32_t addpath_tx_id, struct attr *attr);
 extern void bgp_packet_mpunreach_end(struct stream *s, size_t attrlen_pnt);
 
 extern bgp_attr_parse_ret_t bgp_attr_nexthop_valid(struct peer *peer,
@@ -380,5 +453,4 @@ static inline uint32_t mac_mobility_seqnum(struct attr *attr)
 {
 	return (attr) ? attr->mm_seqnum : 0;
 }
-
 #endif /* _QUAGGA_BGP_ATTR_H */

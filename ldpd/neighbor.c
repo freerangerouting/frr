@@ -143,8 +143,7 @@ nbr_fsm(struct nbr *nbr, enum nbr_event event)
 
 	if (nbr_fsm_tbl[i].state == -1) {
 		/* event outside of the defined fsm, ignore it. */
-		log_warnx("%s: lsr-id %s, event %s not expected in "
-		    "state %s", __func__, inet_ntoa(nbr->id),
+		log_warnx("%s: lsr-id %s, event %s not expected in state %s", __func__, inet_ntoa(nbr->id),
 		    nbr_event_names[event], nbr_state_name(old_state));
 		return (0);
 	}
@@ -153,8 +152,7 @@ nbr_fsm(struct nbr *nbr, enum nbr_event event)
 		nbr->state = new_state;
 
 	if (old_state != nbr->state) {
-		log_debug("%s: event %s resulted in action %s and "
-		    "changing state for lsr-id %s from %s to %s",
+		log_debug("%s: event %s resulted in action %s and changing state for lsr-id %s from %s to %s",
 		    __func__, nbr_event_names[event],
 		    nbr_action_names[nbr_fsm_tbl[i].action],
 		    inet_ntoa(nbr->id), nbr_state_name(old_state),
@@ -617,6 +615,16 @@ nbr_establish_connection(struct nbr *nbr)
 		sock_set_md5sig(nbr->fd, nbr->af, &nbr->raddr,
 		    nbrp->auth.md5key);
 #endif
+	}
+
+	if (nbr->af == AF_INET) {
+		if (sock_set_ipv4_tos(nbr->fd, IPTOS_PREC_INTERNETCONTROL) == -1)
+			log_warn("%s: lsr-id %s, sock_set_ipv4_tos error",
+				__func__, inet_ntoa(nbr->id));
+	} else if (nbr->af == AF_INET6) {
+		if (sock_set_ipv6_dscp(nbr->fd, IPTOS_PREC_INTERNETCONTROL) == -1)
+			log_warn("%s: lsr-id %s, sock_set_ipv6_dscp error",
+				__func__, inet_ntoa(nbr->id));
 	}
 
 	addr2sa(nbr->af, &nbr->laddr, 0, &local_su);

@@ -50,8 +50,7 @@ static int kernel_rtm_add_labels(struct mpls_label_stack *nh_label,
 {
 	if (nh_label->num_labels > 1) {
 		flog_warn(EC_ZEBRA_MAX_LABELS_PUSH,
-			  "%s: can't push %u labels at "
-			  "once (maximum is 1)",
+			  "%s: can't push %u labels at once (maximum is 1)",
 			  __func__, nh_label->num_labels);
 		return -1;
 	}
@@ -180,6 +179,7 @@ static int kernel_rtm(int cmd, const struct prefix *p,
 			switch (p->family) {
 			case AF_INET: {
 				struct in_addr loopback;
+
 				loopback.s_addr = htonl(INADDR_LOOPBACK);
 				sin_gate.sin.sin_addr = loopback;
 #ifdef HAVE_STRUCT_SOCKADDR_SA_LEN
@@ -187,11 +187,21 @@ static int kernel_rtm(int cmd, const struct prefix *p,
 					sizeof(struct sockaddr_in);
 #endif /* HAVE_STRUCT_SOCKADDR_SA_LEN */
 				gate = true;
-			}
-				break;
-			case AF_INET6:
-				zlog_warn("v6 blackhole routes have not been programmed yet");
-				break;
+			} break;
+			case AF_INET6: {
+				struct in6_addr loopback;
+
+				inet_pton(AF_INET6, "::1", &loopback);
+
+				sin_gate.sin6.sin6_addr = loopback;
+				sin_gate.sin6.sin6_family = AF_INET6;
+
+#ifdef HAVE_STRUCTSOCKADDR_SA_LEN
+				sin_gate.sin6.sin6_len =
+					sizeof(struct sockaddr_in6);
+#endif /* HAVE_STRUCTSOCKADDR_SA_LEN */
+				gate = true;
+			} break;
 			}
 		}
 
@@ -348,20 +358,6 @@ enum zebra_dplane_result kernel_route_update(struct zebra_dplane_ctx *ctx)
 		}
 	} /* Elevated privs */
 
-	if (RSYSTEM_ROUTE(type)
-	    && dplane_ctx_get_op(ctx) != DPLANE_OP_ROUTE_DELETE) {
-		struct nexthop *nexthop;
-
-		for (ALL_NEXTHOPS_PTR(dplane_ctx_get_ng(ctx), nexthop)) {
-			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_RECURSIVE))
-				continue;
-
-			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE)) {
-				SET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
-			}
-		}
-	}
-
 	return res;
 }
 
@@ -405,6 +401,27 @@ extern int kernel_interface_set_master(struct interface *master,
 uint32_t kernel_get_speed(struct interface *ifp, int *error)
 {
 	return ifp->speed;
+}
+
+int kernel_upd_mac_nh(uint32_t nh_id, struct in_addr vtep_ip)
+{
+	return 0;
+}
+
+int kernel_del_mac_nh(uint32_t nh_id)
+{
+	return 0;
+}
+
+int kernel_upd_mac_nhg(uint32_t nhg_id, uint32_t nh_cnt,
+		struct nh_grp *nh_ids)
+{
+	return 0;
+}
+
+int kernel_del_mac_nhg(uint32_t nhg_id)
+{
+	return 0;
 }
 
 #endif /* !HAVE_NETLINK */

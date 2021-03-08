@@ -39,6 +39,7 @@
 #include "hash.h"
 #include "queue.h"
 #include "frrstr.h"
+#include "network.h"
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_table.h"
@@ -63,8 +64,9 @@
 #include "bgpd/bgp_pbr.h"
 #include "bgpd/bgp_flowspec_util.h"
 #include "bgpd/bgp_encap_types.h"
+#include "bgpd/bgp_mpath.h"
 
-#if ENABLE_BGP_VNC
+#ifdef ENABLE_BGP_VNC
 #include "bgpd/rfapi/bgp_rfapi_cfg.h"
 #endif
 
@@ -592,10 +594,14 @@ route_match_prefix_list_flowspec(afi_t afi, struct prefix_list *plist,
 
 	memset(&api, 0, sizeof(api));
 
+	if (family2afi(p->u.prefix_flowspec.family) != afi)
+		return RMAP_NOMATCH;
+
 	/* extract match from flowspec entries */
 	ret = bgp_flowspec_match_rules_fill(
 					    (uint8_t *)p->u.prefix_flowspec.ptr,
-					    p->u.prefix_flowspec.prefixlen, &api);
+					    p->u.prefix_flowspec.prefixlen, &api,
+					    afi);
 	if (ret < 0)
 		return RMAP_NOMATCH;
 	if (api.match_bitmask & PREFIX_DST_PRESENT ||
@@ -1015,7 +1021,7 @@ route_match_rd(void *rule, const struct prefix *prefix,
 	       route_map_object_t type, void *object)
 {
 	struct prefix_rd *prd_rule = NULL;
-	struct prefix_rd *prd_route = NULL;
+	const struct prefix_rd *prd_route = NULL;
 	struct bgp_path_info *path = NULL;
 
 	if (type == RMAP_BGP) {
@@ -1025,10 +1031,11 @@ route_match_rd(void *rule, const struct prefix *prefix,
 		prd_rule = (struct prefix_rd *)rule;
 		path = (struct bgp_path_info *)object;
 
-		if (path->net == NULL || path->net->prn == NULL)
+		if (path->net == NULL || path->net->pdest == NULL)
 			return RMAP_NOMATCH;
 
-		prd_route = (struct prefix_rd *)&path->net->prn->p;
+		prd_route = (struct prefix_rd *)bgp_dest_get_prefix(
+			path->net->pdest);
 		if (memcmp(prd_route->val, prd_rule->val, ECOMMUNITY_SIZE) == 0)
 			return RMAP_MATCH;
 	}
@@ -1533,7 +1540,7 @@ static enum route_map_cmd_result_t
 route_match_probability(void *rule, const struct prefix *prefix,
 			route_map_object_t type, void *object)
 {
-	long r = random();
+	long r = frr_weak_random();
 
 	switch (*(long *)rule) {
 	case 0:
@@ -1661,6 +1668,45 @@ static const struct route_map_rule_cmd route_match_tag_cmd = {
 	route_map_rule_tag_free,
 };
 
+static enum route_map_cmd_result_t
+route_set_srte_color(void *rule, const struct prefix *prefix,
+		     route_map_object_t type, void *object)
+{
+	uint32_t *srte_color = rule;
+	struct bgp_path_info *path;
+
+	if (type != RMAP_BGP)
+		return RMAP_OKAY;
+
+	path = object;
+
+	path->attr->srte_color = *srte_color;
+	path->attr->flag |= ATTR_FLAG_BIT(BGP_ATTR_SRTE_COLOR);
+
+	return RMAP_OKAY;
+}
+
+/* Route map `sr-te color' compile function */
+static void *route_set_srte_color_compile(const char *arg)
+{
+	uint32_t *color;
+
+	color = XMALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(uint32_t));
+	*color = atoi(arg);
+
+	return color;
+}
+
+/* Free route map's compiled `sr-te color' value. */
+static void route_set_srte_color_free(void *rule)
+{
+	XFREE(MTYPE_ROUTE_MAP_COMPILED, rule);
+}
+
+/* Route map commands for sr-te color set. */
+struct route_map_rule_cmd route_set_srte_color_cmd = {
+	"sr-te color", route_set_srte_color, route_set_srte_color_compile,
+	route_set_srte_color_free};
 
 /* Set nexthop to object.  ojbect must be pointer to struct attr. */
 struct rmap_ip_nexthop_set {
@@ -1705,7 +1751,7 @@ route_set_ip_nexthop(void *rule, const struct prefix *prefix,
 			 */
 			SET_FLAG(path->attr->rmap_change_flags,
 				 BATTR_RMAP_NEXTHOP_PEER_ADDRESS);
-			path->attr->nexthop.s_addr = 0;
+			path->attr->nexthop.s_addr = INADDR_ANY;
 		}
 	} else {
 		/* Set next hop value. */
@@ -2530,6 +2576,147 @@ static const struct route_map_rule_cmd route_set_ecommunity_soo_cmd = {
 	route_set_ecommunity_free,
 };
 
+/* `set extcommunity bandwidth' */
+
+struct rmap_ecomm_lb_set {
+	uint8_t lb_type;
+#define RMAP_ECOMM_LB_SET_VALUE 1
+#define RMAP_ECOMM_LB_SET_CUMUL 2
+#define RMAP_ECOMM_LB_SET_NUM_MPATH 3
+	bool non_trans;
+	uint32_t bw;
+};
+
+static enum route_map_cmd_result_t
+route_set_ecommunity_lb(void *rule, const struct prefix *prefix,
+			route_map_object_t type, void *object)
+{
+	struct rmap_ecomm_lb_set *rels = rule;
+	struct bgp_path_info *path;
+	struct peer *peer;
+	struct ecommunity ecom_lb = {0};
+	struct ecommunity_val lb_eval;
+	uint32_t bw_bytes = 0;
+	uint16_t mpath_count = 0;
+	struct ecommunity *new_ecom;
+	struct ecommunity *old_ecom;
+	as_t as;
+
+	if (type != RMAP_BGP)
+		return RMAP_OKAY;
+
+	path = object;
+	peer = path->peer;
+	if (!peer || !peer->bgp)
+		return RMAP_ERROR;
+
+	/* Build link bandwidth extended community */
+	as = (peer->bgp->as > BGP_AS_MAX) ? BGP_AS_TRANS : peer->bgp->as;
+	if (rels->lb_type == RMAP_ECOMM_LB_SET_VALUE) {
+		bw_bytes = ((uint64_t)rels->bw * 1000 * 1000) / 8;
+	} else if (rels->lb_type == RMAP_ECOMM_LB_SET_CUMUL) {
+		/* process this only for the best path. */
+		if (!CHECK_FLAG(path->flags, BGP_PATH_SELECTED))
+			return RMAP_OKAY;
+
+		bw_bytes = (uint32_t)bgp_path_info_mpath_cumbw(path);
+		if (!bw_bytes)
+			return RMAP_OKAY;
+
+	} else if (rels->lb_type == RMAP_ECOMM_LB_SET_NUM_MPATH) {
+
+		/* process this only for the best path. */
+		if (!CHECK_FLAG(path->flags, BGP_PATH_SELECTED))
+			return RMAP_OKAY;
+
+		bw_bytes = ((uint64_t)peer->bgp->lb_ref_bw * 1000 * 1000) / 8;
+		mpath_count = bgp_path_info_mpath_count(path) + 1;
+		bw_bytes *= mpath_count;
+	}
+
+	encode_lb_extcomm(as, bw_bytes, rels->non_trans, &lb_eval);
+
+	/* add to route or merge with existing */
+	old_ecom = path->attr->ecommunity;
+	if (old_ecom) {
+		new_ecom = ecommunity_dup(old_ecom);
+		ecommunity_add_val(new_ecom, &lb_eval, true, true);
+		if (!old_ecom->refcnt)
+			ecommunity_free(&old_ecom);
+	} else {
+		ecom_lb.size = 1;
+		ecom_lb.unit_size = ECOMMUNITY_SIZE;
+		ecom_lb.val = (uint8_t *)lb_eval.val;
+		new_ecom = ecommunity_dup(&ecom_lb);
+	}
+
+	/* new_ecom will be intern()'d or attr_flush()'d in call stack */
+	path->attr->ecommunity = new_ecom;
+	path->attr->flag |= ATTR_FLAG_BIT(BGP_ATTR_EXT_COMMUNITIES);
+
+	/* Mark that route-map has set link bandwidth; used in attribute
+	 * setting decisions.
+	 */
+	SET_FLAG(path->attr->rmap_change_flags, BATTR_RMAP_LINK_BW_SET);
+
+	return RMAP_OKAY;
+}
+
+static void *route_set_ecommunity_lb_compile(const char *arg)
+{
+	struct rmap_ecomm_lb_set *rels;
+	uint8_t lb_type;
+	uint32_t bw = 0;
+	char bw_str[40] = {0};
+	char *p, *str;
+	bool non_trans = false;
+
+	str = (char *)arg;
+	p = strchr(arg, ' ');
+	if (p) {
+		int len;
+
+		len = p - arg;
+		memcpy(bw_str, arg, len);
+		non_trans = true;
+		str = bw_str;
+	}
+
+	if (strcmp(str, "cumulative") == 0)
+		lb_type = RMAP_ECOMM_LB_SET_CUMUL;
+	else if (strcmp(str, "num-multipaths") == 0)
+		lb_type = RMAP_ECOMM_LB_SET_NUM_MPATH;
+	else {
+		char *end = NULL;
+
+		bw = strtoul(str, &end, 10);
+		if (*end != '\0')
+			return NULL;
+		lb_type = RMAP_ECOMM_LB_SET_VALUE;
+	}
+
+	rels = XCALLOC(MTYPE_ROUTE_MAP_COMPILED,
+		       sizeof(struct rmap_ecomm_lb_set));
+	rels->lb_type = lb_type;
+	rels->bw = bw;
+	rels->non_trans = non_trans;
+
+	return rels;
+}
+
+static void route_set_ecommunity_lb_free(void *rule)
+{
+	XFREE(MTYPE_ROUTE_MAP_COMPILED, rule);
+}
+
+/* Set community rule structure. */
+struct route_map_rule_cmd route_set_ecommunity_lb_cmd = {
+	"extcommunity bandwidth",
+	route_set_ecommunity_lb,
+	route_set_ecommunity_lb_compile,
+	route_set_ecommunity_lb_free,
+};
+
 /* `set origin ORIGIN' */
 
 /* For origin set. */
@@ -2828,6 +3015,57 @@ static const struct route_map_rule_cmd route_match_ipv6_next_hop_cmd = {
 	route_match_ipv6_next_hop,
 	route_match_ipv6_next_hop_compile,
 	route_match_ipv6_next_hop_free
+};
+
+/* `match ip next-hop IP_ADDRESS' */
+
+static enum route_map_cmd_result_t
+route_match_ipv4_next_hop(void *rule, const struct prefix *prefix,
+			  route_map_object_t type, void *object)
+{
+	struct in_addr *addr = rule;
+	struct bgp_path_info *path;
+
+	if (type == RMAP_BGP) {
+		path = object;
+
+		if (path->attr->nexthop.s_addr == addr->s_addr ||
+		    (path->attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV4 &&
+		     IPV4_ADDR_SAME(&path->attr->mp_nexthop_global_in, addr)))
+			return RMAP_MATCH;
+
+		return RMAP_NOMATCH;
+	}
+
+	return RMAP_NOMATCH;
+}
+
+static void *route_match_ipv4_next_hop_compile(const char *arg)
+{
+	struct in_addr *address;
+	int ret;
+
+	address = XMALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(struct in_addr));
+
+	ret = inet_pton(AF_INET, arg, address);
+	if (!ret) {
+		XFREE(MTYPE_ROUTE_MAP_COMPILED, address);
+		return NULL;
+	}
+
+	return address;
+}
+
+static void route_match_ipv4_next_hop_free(void *rule)
+{
+	XFREE(MTYPE_ROUTE_MAP_COMPILED, rule);
+}
+
+static const struct route_map_rule_cmd route_match_ipv4_next_hop_cmd = {
+	"ip next-hop address",
+	route_match_ipv4_next_hop,
+	route_match_ipv4_next_hop_compile,
+	route_match_ipv4_next_hop_free
 };
 
 /* `match ipv6 address prefix-list PREFIX_LIST' */
@@ -3511,7 +3749,7 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 	afi_t afi;
 	safi_t safi;
 	struct peer *peer;
-	struct bgp_node *bn;
+	struct bgp_dest *bn;
 	struct bgp_static *bgp_static;
 	struct bgp_aggregate *aggregate;
 	struct listnode *node, *nnode;
@@ -3562,8 +3800,7 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 
 			if (BGP_DEBUG(zebra, ZEBRA))
 				zlog_debug(
-					"Processing route_map %s update on "
-					"table map",
+					"Processing route_map %s update on table map",
 					rmap_name);
 			if (route_update)
 				bgp_zebra_announce_table(bgp, afi, safi);
@@ -3572,7 +3809,7 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 		/* For network route-map updates. */
 		for (bn = bgp_table_top(bgp->route[afi][safi]); bn;
 		     bn = bgp_route_next(bn)) {
-			bgp_static = bgp_node_get_bgp_static_info(bn);
+			bgp_static = bgp_dest_get_bgp_static_info(bn);
 			if (!bgp_static)
 				continue;
 
@@ -3586,14 +3823,17 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 			bgp_static->rmap.map = map;
 
 			if (route_update && !bgp_static->backdoor) {
-				if (bgp_debug_zebra(&bn->p))
+				const struct prefix *bn_p =
+					bgp_dest_get_prefix(bn);
+
+				if (bgp_debug_zebra(bn_p))
 					zlog_debug(
 						"Processing route_map %s update on static route %s",
 						rmap_name,
-						inet_ntop(bn->p.family,
-							  &bn->p.u.prefix, buf,
+						inet_ntop(bn_p->family,
+							  &bn_p->u.prefix, buf,
 							  INET6_ADDRSTRLEN));
-				bgp_static_update(bgp, &bn->p, bgp_static, afi,
+				bgp_static_update(bgp, bn_p, bgp_static, afi,
 						  safi);
 			}
 		}
@@ -3601,7 +3841,7 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 		/* For aggregate-address route-map updates. */
 		for (bn = bgp_table_top(bgp->aggregate[afi][safi]); bn;
 		     bn = bgp_route_next(bn)) {
-			aggregate = bgp_node_get_bgp_aggregate_info(bn);
+			aggregate = bgp_dest_get_bgp_aggregate_info(bn);
 			if (!aggregate)
 				continue;
 
@@ -3615,14 +3855,17 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 			aggregate->rmap.map = map;
 
 			if (route_update) {
-				if (bgp_debug_zebra(&bn->p))
+				const struct prefix *bn_p =
+					bgp_dest_get_prefix(bn);
+
+				if (bgp_debug_zebra(bn_p))
 					zlog_debug(
 						"Processing route_map %s update on aggregate-address route %s",
 						rmap_name,
-						inet_ntop(bn->p.family,
-							  &bn->p.u.prefix, buf,
+						inet_ntop(bn_p->family,
+							  &bn_p->u.prefix, buf,
 							  INET6_ADDRSTRLEN));
-				bgp_aggregate_route(bgp, &bn->p, afi, safi,
+				bgp_aggregate_route(bgp, bn_p, afi, safi,
 						    aggregate);
 			}
 		}
@@ -3691,7 +3934,7 @@ static void bgp_route_map_process_update_cb(char *rmap_name)
 	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
 		bgp_route_map_process_update(bgp, rmap_name, 1);
 
-#if ENABLE_BGP_VNC
+#ifdef ENABLE_BGP_VNC
 		/* zlog_debug("%s: calling vnc_routemap_update", __func__); */
 		vnc_routemap_update(bgp, __func__);
 #endif
@@ -3706,7 +3949,7 @@ int bgp_route_map_update_timer(struct thread *thread)
 
 	route_map_walk_update_list(bgp_route_map_process_update_cb);
 
-	return (0);
+	return 0;
 }
 
 static void bgp_route_map_mark_update(const char *rmap_name)
@@ -3735,7 +3978,7 @@ static void bgp_route_map_mark_update(const char *rmap_name)
 	} else {
 		for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp))
 			bgp_route_map_process_update(bgp, rmap_name, 0);
-#if ENABLE_BGP_VNC
+#ifdef ENABLE_BGP_VNC
 		zlog_debug("%s: calling vnc_routemap_update", __func__);
 		vnc_routemap_update(bgp, __func__);
 #endif
@@ -4400,10 +4643,10 @@ DEFUN (no_set_distance,
 
 DEFUN (set_local_pref,
        set_local_pref_cmd,
-       "set local-preference (0-4294967295)",
+       "set local-preference WORD",
        SET_STR
        "BGP local preference path attribute\n"
-       "Preference value\n")
+       "Preference value (0-4294967295)\n")
 {
 	int idx_number = 2;
 	return generic_set_add(vty, VTY_GET_CONTEXT(route_map_index),
@@ -4413,11 +4656,11 @@ DEFUN (set_local_pref,
 
 DEFUN (no_set_local_pref,
        no_set_local_pref_cmd,
-       "no set local-preference [(0-4294967295)]",
+       "no set local-preference [WORD]",
        NO_STR
        SET_STR
        "BGP local preference path attribute\n"
-       "Preference value\n")
+       "Preference value (0-4294967295)\n")
 {
 	int idx_localpref = 3;
 	if (argc <= idx_localpref)
@@ -4946,6 +5189,53 @@ ALIAS (no_set_ecommunity_soo,
        "GP extended community attribute\n"
        "Site-of-Origin extended community\n")
 
+DEFUN (set_ecommunity_lb,
+       set_ecommunity_lb_cmd,
+       "set extcommunity bandwidth <(1-25600)|cumulative|num-multipaths> [non-transitive]",
+       SET_STR
+       "BGP extended community attribute\n"
+       "Link bandwidth extended community\n"
+       "Bandwidth value in Mbps\n"
+       "Cumulative bandwidth of all multipaths (outbound-only)\n"
+       "Internally computed bandwidth based on number of multipaths (outbound-only)\n"
+       "Attribute is set as non-transitive\n")
+{
+	int idx_lb = 3;
+	int ret;
+	char *str;
+
+	str = argv_concat(argv, argc, idx_lb);
+	ret = generic_set_add(vty, VTY_GET_CONTEXT(route_map_index),
+			      "extcommunity bandwidth", str);
+	XFREE(MTYPE_TMP, str);
+	return ret;
+}
+
+
+DEFUN (no_set_ecommunity_lb,
+       no_set_ecommunity_lb_cmd,
+       "no set extcommunity bandwidth <(1-25600)|cumulative|num-multipaths> [non-transitive]",
+       NO_STR
+       SET_STR
+       "BGP extended community attribute\n"
+       "Link bandwidth extended community\n"
+       "Bandwidth value in Mbps\n"
+       "Cumulative bandwidth of all multipaths (outbound-only)\n"
+       "Internally computed bandwidth based on number of multipaths (outbound-only)\n"
+       "Attribute is set as non-transitive\n")
+{
+	return generic_set_delete(vty, VTY_GET_CONTEXT(route_map_index),
+				  "extcommunity bandwidth", NULL);
+}
+
+ALIAS (no_set_ecommunity_lb,
+       no_set_ecommunity_lb_short_cmd,
+       "no set extcommunity bandwidth",
+       NO_STR
+       SET_STR
+       "BGP extended community attribute\n"
+       "Link bandwidth extended community\n")
+
 DEFUN (set_origin,
        set_origin_cmd,
        "set origin <egp|igp|incomplete>",
@@ -5110,6 +5400,34 @@ DEFUN (no_match_ipv6_next_hop,
 				      RMAP_EVENT_MATCH_DELETED);
 }
 
+DEFPY (match_ipv4_next_hop,
+       match_ipv4_next_hop_cmd,
+       "match ip next-hop address A.B.C.D",
+       MATCH_STR
+       IP_STR
+       "Match IP next-hop address of route\n"
+       "IP address\n"
+       "IP address of next-hop\n")
+{
+	int idx_ipv4 = 4;
+
+	return bgp_route_match_add(vty, "ip next-hop address",
+				   argv[idx_ipv4]->arg, RMAP_EVENT_MATCH_ADDED);
+}
+
+DEFPY (no_match_ipv4_next_hop,
+       no_match_ipv4_next_hop_cmd,
+       "no match ip next-hop address [A.B.C.D]",
+       NO_STR
+       MATCH_STR
+       IP_STR
+       "Match IP next-hop address of route\n"
+       "IP address\n"
+       "IP address of next-hop\n")
+{
+	return bgp_route_match_delete(vty, "ip next-hop address", NULL,
+				      RMAP_EVENT_MATCH_DELETED);
+}
 
 DEFUN (set_ipv6_nexthop_peer,
        set_ipv6_nexthop_peer_cmd,
@@ -5407,6 +5725,9 @@ void bgp_route_map_init(void)
 	route_map_match_tag_hook(generic_match_add);
 	route_map_no_match_tag_hook(generic_match_delete);
 
+	route_map_set_srte_color_hook(generic_set_add);
+	route_map_no_set_srte_color_hook(generic_set_delete);
+
 	route_map_set_ip_nexthop_hook(generic_set_add);
 	route_map_no_set_ip_nexthop_hook(generic_set_delete);
 
@@ -5449,6 +5770,7 @@ void bgp_route_map_init(void)
 	route_map_install_match(&route_match_vrl_source_vrf_cmd);
 
 	route_map_install_set(&route_set_table_id_cmd);
+	route_map_install_set(&route_set_srte_color_cmd);
 	route_map_install_set(&route_set_ip_nexthop_cmd);
 	route_map_install_set(&route_set_local_pref_cmd);
 	route_map_install_set(&route_set_weight_cmd);
@@ -5469,6 +5791,7 @@ void bgp_route_map_init(void)
 	route_map_install_set(&route_set_originator_id_cmd);
 	route_map_install_set(&route_set_ecommunity_rt_cmd);
 	route_map_install_set(&route_set_ecommunity_soo_cmd);
+	route_map_install_set(&route_set_ecommunity_lb_cmd);
 	route_map_install_set(&route_set_tag_cmd);
 	route_map_install_set(&route_set_label_index_cmd);
 
@@ -5552,6 +5875,9 @@ void bgp_route_map_init(void)
 	install_element(RMAP_NODE, &set_ecommunity_soo_cmd);
 	install_element(RMAP_NODE, &no_set_ecommunity_soo_cmd);
 	install_element(RMAP_NODE, &no_set_ecommunity_soo_short_cmd);
+	install_element(RMAP_NODE, &set_ecommunity_lb_cmd);
+	install_element(RMAP_NODE, &no_set_ecommunity_lb_cmd);
+	install_element(RMAP_NODE, &no_set_ecommunity_lb_short_cmd);
 #ifdef KEEP_OLD_VPN_COMMANDS
 	install_element(RMAP_NODE, &set_vpn_nexthop_cmd);
 	install_element(RMAP_NODE, &no_set_vpn_nexthop_cmd);
@@ -5563,6 +5889,7 @@ void bgp_route_map_init(void)
 
 	route_map_install_match(&route_match_ipv6_address_cmd);
 	route_map_install_match(&route_match_ipv6_next_hop_cmd);
+	route_map_install_match(&route_match_ipv4_next_hop_cmd);
 	route_map_install_match(&route_match_ipv6_address_prefix_list_cmd);
 	route_map_install_match(&route_match_ipv6_next_hop_type_cmd);
 	route_map_install_set(&route_set_ipv6_nexthop_global_cmd);
@@ -5572,6 +5899,8 @@ void bgp_route_map_init(void)
 
 	install_element(RMAP_NODE, &match_ipv6_next_hop_cmd);
 	install_element(RMAP_NODE, &no_match_ipv6_next_hop_cmd);
+	install_element(RMAP_NODE, &match_ipv4_next_hop_cmd);
+	install_element(RMAP_NODE, &no_match_ipv4_next_hop_cmd);
 	install_element(RMAP_NODE, &set_ipv6_nexthop_global_cmd);
 	install_element(RMAP_NODE, &no_set_ipv6_nexthop_global_cmd);
 	install_element(RMAP_NODE, &set_ipv6_nexthop_prefer_global_cmd);

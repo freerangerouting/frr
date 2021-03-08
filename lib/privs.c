@@ -406,9 +406,11 @@ static void zprivs_caps_init(struct zebra_privs_t *zprivs)
 
 static void zprivs_caps_terminate(void)
 {
-	/* clear all capabilities */
+	/* Clear all capabilities, if we have any. */
 	if (zprivs_state.caps)
 		cap_clear(zprivs_state.caps);
+	else
+		return;
 
 	/* and boom, capabilities are gone forever */
 	if (cap_set_proc(zprivs_state.caps)) {
@@ -556,8 +558,7 @@ static void zprivs_caps_init(struct zebra_privs_t *zprivs)
 	/* nonsensical to have gotten here but not have capabilities */
 	if (!zprivs_state.syscaps_p) {
 		fprintf(stderr,
-			"%s: capabilities enabled, "
-			"but no valid capabilities supplied\n",
+			"%s: capabilities enabled, but no valid capabilities supplied\n",
 			__func__);
 	}
 
@@ -1019,11 +1020,11 @@ void zprivs_get_ids(struct zprivs_ids_t *ids)
 
 	ids->uid_priv = getuid();
 	(zprivs_state.zuid) ? (ids->uid_normal = zprivs_state.zuid)
-			    : (ids->uid_normal = -1);
+			    : (ids->uid_normal = (uid_t)-1);
 	(zprivs_state.zgid) ? (ids->gid_normal = zprivs_state.zgid)
-			    : (ids->gid_normal = -1);
+			    : (ids->gid_normal = (uid_t)-1);
 	(zprivs_state.vtygrp) ? (ids->gid_vty = zprivs_state.vtygrp)
-			      : (ids->gid_vty = -1);
+			      : (ids->gid_vty = (uid_t)-1);
 
 	return;
 }

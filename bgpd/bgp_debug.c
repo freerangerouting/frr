@@ -63,6 +63,8 @@ unsigned long conf_bgp_debug_vpn;
 unsigned long conf_bgp_debug_flowspec;
 unsigned long conf_bgp_debug_labelpool;
 unsigned long conf_bgp_debug_pbr;
+unsigned long conf_bgp_debug_graceful_restart;
+unsigned long conf_bgp_debug_evpn_mh;
 
 unsigned long term_bgp_debug_as4;
 unsigned long term_bgp_debug_neighbor_events;
@@ -80,6 +82,8 @@ unsigned long term_bgp_debug_vpn;
 unsigned long term_bgp_debug_flowspec;
 unsigned long term_bgp_debug_labelpool;
 unsigned long term_bgp_debug_pbr;
+unsigned long term_bgp_debug_graceful_restart;
+unsigned long term_bgp_debug_evpn_mh;
 
 struct list *bgp_debug_neighbor_events_peers = NULL;
 struct list *bgp_debug_keepalive_peers = NULL;
@@ -168,12 +172,22 @@ static const struct message bgp_notify_capability_msg[] = {
 	{BGP_NOTIFY_CAPABILITY_MALFORMED_CODE, "/Malformed Capability Value"},
 	{0}};
 
+static const struct message bgp_notify_fsm_msg[] = {
+	{BGP_NOTIFY_FSM_ERR_SUBCODE_UNSPECIFIC, "/Unspecific"},
+	{BGP_NOTIFY_FSM_ERR_SUBCODE_OPENSENT,
+	 "/Receive Unexpected Message in OpenSent State"},
+	{BGP_NOTIFY_FSM_ERR_SUBCODE_OPENCONFIRM,
+	 "/Receive Unexpected Message in OpenConfirm State"},
+	{BGP_NOTIFY_FSM_ERR_SUBCODE_ESTABLISHED,
+	 "/Receive Unexpected Message in Established State"},
+	{0}};
+
 /* Origin strings. */
 const char *const bgp_origin_str[] = {"i", "e", "?"};
 const char *const bgp_origin_long_str[] = {"IGP", "EGP", "incomplete"};
 
-static int bgp_debug_print_evpn_prefix(struct vty *vty, const char *desc,
-				       struct prefix *p);
+static void bgp_debug_print_evpn_prefix(struct vty *vty, const char *desc,
+					struct prefix *p);
 /* Given a string return a pointer the corresponding peer structure */
 static struct peer *bgp_find_peer(struct vty *vty, const char *peer_str)
 {
@@ -207,13 +221,8 @@ static void bgp_debug_list_free(struct list *list)
 	if (list)
 		for (ALL_LIST_ELEMENTS(list, node, nnode, filter)) {
 			listnode_delete(list, filter);
-
-			if (filter->p)
-				prefix_free(&filter->p);
-
-			if (filter->host)
-				XFREE(MTYPE_BGP_DEBUG_STR, filter->host);
-
+			prefix_free(&filter->p);
+			XFREE(MTYPE_BGP_DEBUG_STR, filter->host);
 			XFREE(MTYPE_BGP_DEBUG_FILTER, filter);
 		}
 }
@@ -308,8 +317,8 @@ static void bgp_debug_list_add_entry(struct list *list, const char *host,
 	listnode_add(list, filter);
 }
 
-static int bgp_debug_list_remove_entry(struct list *list, const char *host,
-				       struct prefix *p)
+static bool bgp_debug_list_remove_entry(struct list *list, const char *host,
+					struct prefix *p)
 {
 	struct bgp_debug_filter *filter;
 	struct listnode *node, *nnode;
@@ -319,21 +328,21 @@ static int bgp_debug_list_remove_entry(struct list *list, const char *host,
 			listnode_delete(list, filter);
 			XFREE(MTYPE_BGP_DEBUG_STR, filter->host);
 			XFREE(MTYPE_BGP_DEBUG_FILTER, filter);
-			return 1;
+			return true;
 		} else if (p && filter->p->prefixlen == p->prefixlen
 			   && prefix_match(filter->p, p)) {
 			listnode_delete(list, filter);
 			prefix_free(&filter->p);
 			XFREE(MTYPE_BGP_DEBUG_FILTER, filter);
-			return 1;
+			return true;
 		}
 	}
 
-	return 0;
+	return false;
 }
 
-static int bgp_debug_list_has_entry(struct list *list, const char *host,
-				    const struct prefix *p)
+static bool bgp_debug_list_has_entry(struct list *list, const char *host,
+				     const struct prefix *p)
 {
 	struct bgp_debug_filter *filter;
 	struct listnode *node, *nnode;
@@ -341,32 +350,32 @@ static int bgp_debug_list_has_entry(struct list *list, const char *host,
 	for (ALL_LIST_ELEMENTS(list, node, nnode, filter)) {
 		if (host) {
 			if (strcmp(filter->host, host) == 0) {
-				return 1;
+				return true;
 			}
 		} else if (p) {
 			if (filter->p->prefixlen == p->prefixlen
 			    && prefix_match(filter->p, p)) {
-				return 1;
+				return true;
 			}
 		}
 	}
 
-	return 0;
+	return false;
 }
 
-int bgp_debug_peer_updout_enabled(char *host)
+bool bgp_debug_peer_updout_enabled(char *host)
 {
 	return (bgp_debug_list_has_entry(bgp_debug_update_out_peers, host,
 					 NULL));
 }
 
 /* Dump attribute. */
-int bgp_dump_attr(struct attr *attr, char *buf, size_t size)
+bool bgp_dump_attr(struct attr *attr, char *buf, size_t size)
 {
 	char addrbuf[BUFSIZ];
 
 	if (!attr)
-		return 0;
+		return false;
 
 	buf[0] = '\0';
 
@@ -448,9 +457,9 @@ int bgp_dump_attr(struct attr *attr, char *buf, size_t size)
 	}
 
 	if (strlen(buf) > 1)
-		return 1;
+		return true;
 	else
-		return 0;
+		return false;
 }
 
 const char *bgp_notify_code_str(char code)
@@ -474,7 +483,8 @@ const char *bgp_notify_subcode_str(char code, char subcode)
 	case BGP_NOTIFY_HOLD_ERR:
 		break;
 	case BGP_NOTIFY_FSM_ERR:
-		break;
+		return lookup_msg(bgp_notify_fsm_msg, subcode,
+				  "Unrecognized Error Subcode");
 	case BGP_NOTIFY_CEASE:
 		return lookup_msg(bgp_notify_cease_msg, subcode,
 				  "Unrecognized Error Subcode");
@@ -509,7 +519,7 @@ void bgp_notify_print(struct peer *peer, struct bgp_notify *bgp_notify,
 	char msg_buf[1024];
 
 	if (BGP_DEBUG(neighbor_events, NEIGHBOR_EVENTS)
-	    || bgp_flag_check(peer->bgp, BGP_FLAG_LOG_NEIGHBOR_CHANGES)) {
+	    || CHECK_FLAG(peer->bgp->flags, BGP_FLAG_LOG_NEIGHBOR_CHANGES)) {
 		code_str = bgp_notify_code_str(bgp_notify->code);
 		subcode_str = bgp_notify_subcode_str(bgp_notify->code,
 						     bgp_notify->subcode);
@@ -553,8 +563,8 @@ static void bgp_debug_clear_updgrp_update_dbg(struct bgp *bgp)
 	update_group_walk(bgp, update_group_clear_update_dbg, NULL);
 }
 
-static int bgp_debug_print_evpn_prefix(struct vty *vty, const char *desc,
-				       struct prefix *p)
+static void bgp_debug_print_evpn_prefix(struct vty *vty, const char *desc,
+					struct prefix *p)
 {
 	char evpn_desc[PREFIX2STR_BUFFER + INET_ADDRSTRLEN];
 	char buf[PREFIX2STR_BUFFER];
@@ -562,39 +572,42 @@ static int bgp_debug_print_evpn_prefix(struct vty *vty, const char *desc,
 
 	if (p->u.prefix_evpn.route_type == BGP_EVPN_MAC_IP_ROUTE) {
 		if (is_evpn_prefix_ipaddr_none((struct prefix_evpn *)p)) {
-			sprintf(evpn_desc, "l2vpn evpn type macip mac %s",
-				 prefix_mac2str(
-					&p->u.prefix_evpn.macip_addr.mac,
-					buf2, sizeof(buf2)));
+			snprintf(
+				evpn_desc, sizeof(evpn_desc),
+				"l2vpn evpn type macip mac %s",
+				prefix_mac2str(&p->u.prefix_evpn.macip_addr.mac,
+					       buf2, sizeof(buf2)));
 		} else {
 			uint8_t family = is_evpn_prefix_ipaddr_v4(
 						(struct prefix_evpn *)p) ?
 							AF_INET : AF_INET6;
-			sprintf(evpn_desc, "l2vpn evpn type macip mac %s ip %s",
-				 prefix_mac2str(
-					&p->u.prefix_evpn.macip_addr.mac,
-					buf2, sizeof(buf2)),
-				 inet_ntop(family,
+			snprintf(
+				evpn_desc, sizeof(evpn_desc),
+				"l2vpn evpn type macip mac %s ip %s",
+				prefix_mac2str(&p->u.prefix_evpn.macip_addr.mac,
+					       buf2, sizeof(buf2)),
+				inet_ntop(
+					family,
 					&p->u.prefix_evpn.macip_addr.ip.ip.addr,
 					buf, PREFIX2STR_BUFFER));
 		}
 	} else if (p->u.prefix_evpn.route_type == BGP_EVPN_IMET_ROUTE) {
-		sprintf(evpn_desc, "l2vpn evpn type multicast ip %s",
-			inet_ntoa(p->u.prefix_evpn.imet_addr.ip.ipaddr_v4));
+		snprintf(evpn_desc, sizeof(evpn_desc),
+			 "l2vpn evpn type multicast ip %s",
+			 inet_ntoa(p->u.prefix_evpn.imet_addr.ip.ipaddr_v4));
 	} else if (p->u.prefix_evpn.route_type == BGP_EVPN_IP_PREFIX_ROUTE) {
 		uint8_t family = is_evpn_prefix_ipaddr_v4(
 					(struct prefix_evpn *)p) ? AF_INET
 								: AF_INET6;
-		sprintf(evpn_desc, "l2vpn evpn type prefix ip %s/%d",
-			inet_ntop(family,
-				  &p->u.prefix_evpn.prefix_addr.ip.ip.addr, buf,
-				  PREFIX2STR_BUFFER),
-			p->u.prefix_evpn.prefix_addr.ip_prefix_length);
+		snprintf(evpn_desc, sizeof(evpn_desc),
+			 "l2vpn evpn type prefix ip %s/%d",
+			 inet_ntop(family,
+				   &p->u.prefix_evpn.prefix_addr.ip.ip.addr,
+				   buf, PREFIX2STR_BUFFER),
+			 p->u.prefix_evpn.prefix_addr.ip_prefix_length);
 	}
 
 	vty_out(vty, "%s %s\n", desc, evpn_desc);
-
-	return 0;
 }
 
 static int bgp_debug_parse_evpn_prefix(struct vty *vty, struct cmd_token **argv,
@@ -902,8 +915,8 @@ DEFUN (debug_bgp_keepalive_peer,
        "debug bgp keepalives <A.B.C.D|X:X::X:X|WORD>",
        DEBUG_STR
        BGP_STR
-       "BGP Neighbor Events\n"
-       "BGP neighbor IP address to debug\n"
+       "BGP keepalives\n"
+       "BGP IPv4 neighbor to debug\n"
        "BGP IPv6 neighbor to debug\n"
        "BGP neighbor on interface to debug\n")
 {
@@ -1644,6 +1657,23 @@ DEFUN (debug_bgp_zebra,
 	return CMD_SUCCESS;
 }
 
+DEFUN (debug_bgp_graceful_restart,
+       debug_bgp_graceful_restart_cmd,
+       "debug bgp graceful-restart",
+       DEBUG_STR
+       BGP_STR
+       GR_DEBUG)
+{
+	if (vty->node == CONFIG_NODE) {
+		DEBUG_ON(graceful_restart, GRACEFUL_RESTART);
+	} else {
+		TERM_DEBUG_ON(graceful_restart, GRACEFUL_RESTART);
+		vty_out(vty, "BGP Graceful Restart debugging is on\n");
+	}
+	return CMD_SUCCESS;
+}
+
+
 DEFUN (debug_bgp_zebra_prefix,
        debug_bgp_zebra_prefix_cmd,
        "debug bgp zebra prefix <A.B.C.D/M|X:X::X:X/M>",
@@ -1698,6 +1728,23 @@ DEFUN (no_debug_bgp_zebra,
 	else {
 		TERM_DEBUG_OFF(zebra, ZEBRA);
 		vty_out(vty, "BGP zebra debugging is off\n");
+	}
+	return CMD_SUCCESS;
+}
+
+DEFUN (no_debug_bgp_graceful_restart,
+	no_debug_bgp_graceful_restart_cmd,
+	"no debug bgp graceful-restart",
+	DEBUG_STR
+	BGP_STR
+	GR_DEBUG
+	NO_STR)
+{
+	if (vty->node == CONFIG_NODE) {
+		DEBUG_OFF(graceful_restart, GRACEFUL_RESTART);
+	} else {
+		TERM_DEBUG_OFF(graceful_restart, GRACEFUL_RESTART);
+		vty_out(vty, "BGP Graceful Restart debugging is off\n");
 	}
 	return CMD_SUCCESS;
 }
@@ -1961,6 +2008,57 @@ DEFUN (no_debug_bgp_pbr,
 	return CMD_SUCCESS;
 }
 
+DEFPY (debug_bgp_evpn_mh,
+       debug_bgp_evpn_mh_cmd,
+       "[no$no] debug bgp evpn mh <es$es|route$rt>",
+       NO_STR
+       DEBUG_STR
+       BGP_STR
+       "EVPN\n"
+       "Multihoming\n"
+       "Ethernet Segment debugging\n"
+       "Route debugging\n")
+{
+	if (es) {
+		if (vty->node == CONFIG_NODE) {
+			if (no)
+				DEBUG_OFF(evpn_mh, EVPN_MH_ES);
+			else
+				DEBUG_ON(evpn_mh, EVPN_MH_ES);
+		} else {
+			if (no) {
+				TERM_DEBUG_OFF(evpn_mh, EVPN_MH_ES);
+				vty_out(vty,
+					"BGP EVPN-MH ES debugging is off\n");
+			} else {
+				TERM_DEBUG_ON(evpn_mh, EVPN_MH_ES);
+				vty_out(vty,
+					"BGP EVPN-MH ES debugging is on\n");
+			}
+		}
+	}
+	if (rt) {
+		if (vty->node == CONFIG_NODE) {
+			if (no)
+				DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+			else
+				DEBUG_ON(evpn_mh, EVPN_MH_RT);
+		} else {
+			if (no) {
+				TERM_DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+				vty_out(vty,
+					"BGP EVPN-MH route debugging is off\n");
+			} else {
+				TERM_DEBUG_ON(evpn_mh, EVPN_MH_RT);
+				vty_out(vty,
+					"BGP EVPN-MH route debugging is on\n");
+			}
+		}
+	}
+
+	return CMD_SUCCESS;
+}
+
 DEFUN (debug_bgp_labelpool,
        debug_bgp_labelpool_cmd,
        "debug bgp labelpool",
@@ -2039,6 +2137,10 @@ DEFUN (no_debug_bgp,
 	TERM_DEBUG_OFF(labelpool, LABELPOOL);
 	TERM_DEBUG_OFF(pbr, PBR);
 	TERM_DEBUG_OFF(pbr, PBR_ERROR);
+	TERM_DEBUG_OFF(graceful_restart, GRACEFUL_RESTART);
+	TERM_DEBUG_OFF(evpn_mh, EVPN_MH_ES);
+	TERM_DEBUG_OFF(evpn_mh, EVPN_MH_RT);
+
 	vty_out(vty, "All possible debugging has been turned off\n");
 
 	return CMD_SUCCESS;
@@ -2096,6 +2198,9 @@ DEFUN_NOSH (show_debugging_bgp,
 		bgp_debug_list_print(vty, "  BGP zebra debugging is on",
 				     bgp_debug_zebra_prefixes);
 
+	if (BGP_DEBUG(graceful_restart, GRACEFUL_RESTART))
+		vty_out(vty, "  BGP graceful-restart debugging is on\n");
+
 	if (BGP_DEBUG(allow_martians, ALLOW_MARTIANS))
 		vty_out(vty, "  BGP allow martian next hop debugging is on\n");
 
@@ -2118,6 +2223,11 @@ DEFUN_NOSH (show_debugging_bgp,
 		vty_out(vty, "  BGP policy based routing debugging is on\n");
 	if (BGP_DEBUG(pbr, PBR_ERROR))
 		vty_out(vty, "  BGP policy based routing error debugging is on\n");
+
+	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
+		vty_out(vty, "  BGP EVPN-MH ES debugging is on\n");
+	if (BGP_DEBUG(evpn_mh, EVPN_MH_RT))
+		vty_out(vty, "  BGP EVPN-MH route debugging is on\n");
 
 	vty_out(vty, "\n");
 	return CMD_SUCCESS;
@@ -2229,14 +2339,35 @@ static int bgp_config_write_debug(struct vty *vty)
 		vty_out(vty, "debug bgp pbr error\n");
 		write++;
 	}
+
+	if (CONF_BGP_DEBUG(graceful_restart, GRACEFUL_RESTART)) {
+		vty_out(vty, "debug bgp graceful-restart\n");
+		write++;
+	}
+
+	if (CONF_BGP_DEBUG(evpn_mh, EVPN_MH_ES)) {
+		vty_out(vty, "debug bgp evpn mh es\n");
+		write++;
+	}
+	if (CONF_BGP_DEBUG(evpn_mh, EVPN_MH_RT)) {
+		vty_out(vty, "debug bgp evpn mh route\n");
+		write++;
+	}
+
 	return write;
 }
 
-static struct cmd_node debug_node = {DEBUG_NODE, "", 1};
+static int bgp_config_write_debug(struct vty *vty);
+static struct cmd_node debug_node = {
+	.name = "debug",
+	.node = DEBUG_NODE,
+	.prompt = "",
+	.config_write = bgp_config_write_debug,
+};
 
 void bgp_debug_init(void)
 {
-	install_node(&debug_node, bgp_config_write_debug);
+	install_node(&debug_node);
 
 	install_element(ENABLE_NODE, &show_debugging_bgp_cmd);
 
@@ -2261,6 +2392,9 @@ void bgp_debug_init(void)
 	install_element(CONFIG_NODE, &debug_bgp_update_groups_cmd);
 	install_element(ENABLE_NODE, &debug_bgp_bestpath_prefix_cmd);
 	install_element(CONFIG_NODE, &debug_bgp_bestpath_prefix_cmd);
+
+	install_element(ENABLE_NODE, &debug_bgp_graceful_restart_cmd);
+	install_element(CONFIG_NODE, &debug_bgp_graceful_restart_cmd);
 
 	/* debug bgp updates (in|out) */
 	install_element(ENABLE_NODE, &debug_bgp_update_direct_cmd);
@@ -2327,6 +2461,9 @@ void bgp_debug_init(void)
 	install_element(ENABLE_NODE, &no_debug_bgp_bestpath_prefix_cmd);
 	install_element(CONFIG_NODE, &no_debug_bgp_bestpath_prefix_cmd);
 
+	install_element(ENABLE_NODE, &no_debug_bgp_graceful_restart_cmd);
+	install_element(CONFIG_NODE, &no_debug_bgp_graceful_restart_cmd);
+
 	install_element(ENABLE_NODE, &debug_bgp_vpn_cmd);
 	install_element(CONFIG_NODE, &debug_bgp_vpn_cmd);
 	install_element(ENABLE_NODE, &no_debug_bgp_vpn_cmd);
@@ -2343,12 +2480,14 @@ void bgp_debug_init(void)
 	install_element(ENABLE_NODE, &no_debug_bgp_pbr_cmd);
 	install_element(CONFIG_NODE, &no_debug_bgp_pbr_cmd);
 
+	install_element(ENABLE_NODE, &debug_bgp_evpn_mh_cmd);
+	install_element(CONFIG_NODE, &debug_bgp_evpn_mh_cmd);
 }
 
 /* Return true if this prefix is on the per_prefix_list of prefixes to debug
  * for BGP_DEBUG_TYPE
  */
-static int bgp_debug_per_prefix(struct prefix *p,
+static int bgp_debug_per_prefix(const struct prefix *p,
 				unsigned long term_bgp_debug_type,
 				unsigned int BGP_DEBUG_TYPE,
 				struct list *per_prefix_list)
@@ -2433,8 +2572,8 @@ int bgp_debug_keepalive(struct peer *peer)
 				  bgp_debug_keepalive_peers);
 }
 
-int bgp_debug_update(struct peer *peer, struct prefix *p,
-		     struct update_group *updgrp, unsigned int inbound)
+bool bgp_debug_update(struct peer *peer, const struct prefix *p,
+		      struct update_group *updgrp, unsigned int inbound)
 {
 	char *host = NULL;
 
@@ -2445,7 +2584,7 @@ int bgp_debug_update(struct peer *peer, struct prefix *p,
 		if (bgp_debug_per_peer(host, term_bgp_debug_update,
 				       BGP_DEBUG_UPDATE_IN,
 				       bgp_debug_update_in_peers))
-			return 1;
+			return true;
 	}
 
 	/* outbound */
@@ -2453,12 +2592,12 @@ int bgp_debug_update(struct peer *peer, struct prefix *p,
 		if (bgp_debug_per_peer(host, term_bgp_debug_update,
 				       BGP_DEBUG_UPDATE_OUT,
 				       bgp_debug_update_out_peers))
-			return 1;
+			return true;
 
 		/* Check if update debugging implicitly enabled for the group.
 		 */
 		if (updgrp && UPDGRP_DBG_ON(updgrp))
-			return 1;
+			return true;
 	}
 
 
@@ -2466,38 +2605,38 @@ int bgp_debug_update(struct peer *peer, struct prefix *p,
 		if (bgp_debug_per_prefix(p, term_bgp_debug_update,
 					 BGP_DEBUG_UPDATE_PREFIX,
 					 bgp_debug_update_prefixes))
-			return 1;
+			return true;
 	}
 
-	return 0;
+	return false;
 }
 
-int bgp_debug_bestpath(struct prefix *p)
+bool bgp_debug_bestpath(struct bgp_dest *dest)
 {
 	if (BGP_DEBUG(bestpath, BESTPATH)) {
-		if (bgp_debug_per_prefix(p, term_bgp_debug_bestpath,
-					 BGP_DEBUG_BESTPATH,
-					 bgp_debug_bestpath_prefixes))
-			return 1;
+		if (bgp_debug_per_prefix(
+			    bgp_dest_get_prefix(dest), term_bgp_debug_bestpath,
+			    BGP_DEBUG_BESTPATH, bgp_debug_bestpath_prefixes))
+			return true;
 	}
 
-	return 0;
+	return false;
 }
 
-int bgp_debug_zebra(struct prefix *p)
+bool bgp_debug_zebra(const struct prefix *p)
 {
 	if (BGP_DEBUG(zebra, ZEBRA)) {
 		if (bgp_debug_per_prefix(p, term_bgp_debug_zebra,
 					 BGP_DEBUG_ZEBRA,
 					 bgp_debug_zebra_prefixes))
-			return 1;
+			return true;
 	}
 
-	return 0;
+	return false;
 }
 
 const char *bgp_debug_rdpfxpath2str(afi_t afi, safi_t safi,
-				    struct prefix_rd *prd,
+				    const struct prefix_rd *prd,
 				    union prefixconstptr pu,
 				    mpls_label_t *label, uint32_t num_labels,
 				    int addpath_valid, uint32_t addpath_id,
@@ -2530,12 +2669,14 @@ const char *bgp_debug_rdpfxpath2str(afi_t afi, safi_t safi,
 			char tag_buf2[20];
 
 			bgp_evpn_label2str(label, num_labels, tag_buf2, 20);
-			sprintf(tag_buf, " label %s", tag_buf2);
+			snprintf(tag_buf, sizeof(tag_buf), " label %s",
+				 tag_buf2);
 		} else {
 			uint32_t label_value;
 
 			label_value = decode_label(label);
-			sprintf(tag_buf, " label %u", label_value);
+			snprintf(tag_buf, sizeof(tag_buf), " label %u",
+				 label_value);
 		}
 	}
 
@@ -2551,7 +2692,8 @@ const char *bgp_debug_rdpfxpath2str(afi_t afi, safi_t safi,
 		bgp_fs_nlri_get_string((unsigned char *)fs->prefix.ptr,
 				       fs->prefix.prefixlen,
 				       return_string,
-				       NLRI_STRING_FORMAT_DEBUG, NULL);
+				       NLRI_STRING_FORMAT_DEBUG, NULL,
+				       family2afi(fs->prefix.family));
 		snprintf(str, size, "FS %s Match{%s}", afi2str(afi),
 			 return_string);
 	} else

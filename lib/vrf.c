@@ -36,9 +36,10 @@
 #include "privs.h"
 #include "nexthop_group.h"
 #include "lib_errors.h"
+#include "northbound.h"
+#include "northbound_cli.h"
 
-/* default VRF ID value used when VRF backend is not NETNS */
-#define VRF_DEFAULT_INTERNAL 0
+/* default VRF name value used when VRF backend is not NETNS */
 #define VRF_DEFAULT_NAME_INTERNAL "default"
 
 DEFINE_MTYPE_STATIC(LIB, VRF, "VRF")
@@ -116,7 +117,7 @@ static void vrf_update_vrf_id(ns_id_t ns_id, void *opaqueptr)
 	vrf->vrf_id = vrf_id;
 	RB_INSERT(vrf_id_head, &vrfs_by_id, vrf);
 	if (old_vrf_id == VRF_UNKNOWN)
-		vrf_enable((struct vrf *)vrf);
+		vrf_enable(vrf);
 }
 
 int vrf_switch_to_netns(vrf_id_t vrf_id)
@@ -156,10 +157,6 @@ struct vrf *vrf_get(vrf_id_t vrf_id, const char *name)
 {
 	struct vrf *vrf = NULL;
 	int new = 0;
-
-	if (debug_vrf)
-		zlog_debug("VRF_GET: %s(%u)", name == NULL ? "(NULL)" : name,
-			   vrf_id);
 
 	/* Nothing to see, move along here */
 	if (!name && vrf_id == VRF_UNKNOWN)
@@ -223,7 +220,8 @@ struct vrf *vrf_get(vrf_id_t vrf_id, const char *name)
 void vrf_delete(struct vrf *vrf)
 {
 	if (debug_vrf)
-		zlog_debug("VRF %u is to be deleted.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is to be deleted.", vrf->name,
+			   vrf->vrf_id);
 
 	if (vrf_is_enabled(vrf))
 		vrf_disable(vrf);
@@ -280,7 +278,7 @@ int vrf_enable(struct vrf *vrf)
 		return 1;
 
 	if (debug_vrf)
-		zlog_debug("VRF %u is enabled.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is enabled.", vrf->name, vrf->vrf_id);
 
 	SET_FLAG(vrf->status, VRF_ACTIVE);
 
@@ -310,10 +308,19 @@ void vrf_disable(struct vrf *vrf)
 	UNSET_FLAG(vrf->status, VRF_ACTIVE);
 
 	if (debug_vrf)
-		zlog_debug("VRF %u is to be disabled.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is to be disabled.", vrf->name,
+			   vrf->vrf_id);
 
 	/* Till now, nothing to be done for the default VRF. */
 	// Pending: see why this statement.
+
+
+	/*
+	 * When the vrf is disabled let's
+	 * handle all nexthop-groups associated
+	 * with this vrf
+	 */
+	nexthop_group_disable_vrf(vrf);
 
 	if (vrf_master.vrf_disable_hook)
 		(*vrf_master.vrf_disable_hook)(vrf);
@@ -323,11 +330,11 @@ const char *vrf_id_to_name(vrf_id_t vrf_id)
 {
 	struct vrf *vrf;
 
-	vrf = vrf_lookup_by_id(vrf_id);
-	if (vrf)
-		return vrf->name;
+	if (vrf_id == VRF_DEFAULT)
+		return VRF_DEFAULT_NAME;
 
-	return "n/a";
+	vrf = vrf_lookup_by_id(vrf_id);
+	return VRF_LOGNAME(vrf);
 }
 
 vrf_id_t vrf_name_to_id(const char *name)
@@ -493,8 +500,7 @@ void vrf_init(int (*create)(struct vrf *), int (*enable)(struct vrf *),
 	/* initialise NS, in case VRF backend if NETNS */
 	ns_init();
 	if (debug_vrf)
-		zlog_debug("%s: Initializing VRF subsystem",
-			   __PRETTY_FUNCTION__);
+		zlog_debug("%s: Initializing VRF subsystem", __func__);
 
 	vrf_master.vrf_new_hook = create;
 	vrf_master.vrf_enable_hook = enable;
@@ -514,7 +520,7 @@ void vrf_init(int (*create)(struct vrf *), int (*enable)(struct vrf *),
 
 		strlcpy(default_vrf->data.l.netns_name,
 			VRF_DEFAULT_NAME, NS_NAMSIZ);
-		ns = ns_lookup(ns_get_default_id());
+		ns = ns_lookup(NS_DEFAULT);
 		ns->vrf_ctxt = default_vrf;
 		default_vrf->ns_ctxt = ns;
 	}
@@ -535,8 +541,7 @@ void vrf_terminate(void)
 	struct vrf *vrf;
 
 	if (debug_vrf)
-		zlog_debug("%s: Shutting down vrf subsystem",
-			   __PRETTY_FUNCTION__);
+		zlog_debug("%s: Shutting down vrf subsystem", __func__);
 
 	while (!RB_EMPTY(vrf_id_head, &vrfs_by_id)) {
 		vrf = RB_ROOT(vrf_id_head, &vrfs_by_id);
@@ -595,16 +600,30 @@ int vrf_get_backend(void)
 	return vrf_backend;
 }
 
-void vrf_configure_backend(int vrf_backend_netns)
+int vrf_configure_backend(enum vrf_backend_type backend)
 {
-	vrf_backend = vrf_backend_netns;
+	/* Work around issue in old gcc */
+	switch (backend) {
+	case VRF_BACKEND_UNKNOWN:
+	case VRF_BACKEND_NETNS:
+	case VRF_BACKEND_VRF_LITE:
+		break;
+	default:
+		return -1;
+	}
+
+	vrf_backend = backend;
 	vrf_backend_configured = 1;
+
+	return 0;
 }
 
 int vrf_handler_create(struct vty *vty, const char *vrfname,
 		       struct vrf **vrf)
 {
 	struct vrf *vrfp;
+	char xpath_list[XPATH_MAXLEN];
+	int ret;
 
 	if (strlen(vrfname) > VRF_NAMSIZ) {
 		if (vty)
@@ -619,18 +638,31 @@ int vrf_handler_create(struct vty *vty, const char *vrfname,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	vrfp = vrf_get(VRF_UNKNOWN, vrfname);
+	if (vty) {
+		snprintf(xpath_list, sizeof(xpath_list), FRR_VRF_KEY_XPATH,
+			 vrfname);
 
-	if (vty)
-		VTY_PUSH_CONTEXT(VRF_NODE, vrfp);
+		nb_cli_enqueue_change(vty, xpath_list, NB_OP_CREATE, NULL);
+		ret = nb_cli_apply_changes(vty, xpath_list);
+		if (ret == CMD_SUCCESS) {
+			VTY_PUSH_XPATH(VRF_NODE, xpath_list);
+			nb_cli_pending_commit_check(vty);
+			vrfp = vrf_lookup_by_name(vrfname);
+			if (vrfp)
+				VTY_PUSH_CONTEXT(VRF_NODE, vrfp);
+		}
+	} else {
+		vrfp = vrf_get(VRF_UNKNOWN, vrfname);
 
-	if (vrf)
-		*vrf = vrfp;
+		if (vrf)
+			*vrf = vrfp;
+	}
 	return CMD_SUCCESS;
 }
 
 int vrf_netns_handler_create(struct vty *vty, struct vrf *vrf, char *pathname,
-			     ns_id_t ns_id, ns_id_t internal_ns_id)
+			     ns_id_t ns_id, ns_id_t internal_ns_id,
+			     ns_id_t rel_def_ns_id)
 {
 	struct ns *ns = NULL;
 
@@ -668,8 +700,7 @@ int vrf_netns_handler_create(struct vty *vty, struct vrf *vrf, char *pathname,
 			return CMD_SUCCESS;
 		if (vty)
 			vty_out(vty,
-				"NS %s is already configured"
-				" with VRF %u(%s)\n",
+				"NS %s is already configured with VRF %u(%s)\n",
 				ns->name, vrf2->vrf_id, vrf2->name);
 		else
 			zlog_info("NS %s is already configured with VRF %u(%s)",
@@ -678,6 +709,7 @@ int vrf_netns_handler_create(struct vty *vty, struct vrf *vrf, char *pathname,
 	}
 	ns = ns_get_created(ns, pathname, ns_id);
 	ns->internal_ns_id = internal_ns_id;
+	ns->relative_default_ns = rel_def_ns_id;
 	ns->vrf_ctxt = (void *)vrf;
 	vrf->ns_ctxt = (void *)ns;
 	/* update VRF netns NAME */
@@ -704,11 +736,11 @@ DEFUN_NOSH(vrf_exit,
 {
 	/* We have to set vrf context to default vrf */
 	VTY_PUSH_CONTEXT(VRF_NODE, vrf_get(VRF_DEFAULT, VRF_DEFAULT_NAME));
-	vty->node = CONFIG_NODE;
+	cmd_exit(vty);
 	return CMD_SUCCESS;
 }
 
-DEFUN_NOSH (vrf,
+DEFUN_YANG_NOSH (vrf,
        vrf_cmd,
        "vrf NAME",
        "Select a VRF to configure\n"
@@ -720,7 +752,7 @@ DEFUN_NOSH (vrf,
 	return vrf_handler_create(vty, vrfname, NULL);
 }
 
-DEFUN (no_vrf,
+DEFUN_YANG (no_vrf,
        no_vrf_cmd,
        "no vrf NAME",
        NO_STR
@@ -728,30 +760,33 @@ DEFUN (no_vrf,
        "VRF's name\n")
 {
 	const char *vrfname = argv[2]->arg;
+	char xpath_list[XPATH_MAXLEN];
 
 	struct vrf *vrfp;
 
 	vrfp = vrf_lookup_by_name(vrfname);
 
-	if (vrfp == NULL) {
-		vty_out(vty, "%% VRF %s does not exist\n", vrfname);
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	if (vrfp == NULL)
+		return CMD_SUCCESS;
 
 	if (CHECK_FLAG(vrfp->status, VRF_ACTIVE)) {
 		vty_out(vty, "%% Only inactive VRFs can be deleted\n");
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	/* Clear configured flag and invoke delete. */
-	UNSET_FLAG(vrfp->status, VRF_CONFIGURED);
-	vrf_delete(vrfp);
+	snprintf(xpath_list, sizeof(xpath_list), FRR_VRF_KEY_XPATH, vrfname);
 
-	return CMD_SUCCESS;
+	nb_cli_enqueue_change(vty, xpath_list, NB_OP_DESTROY, NULL);
+	return nb_cli_apply_changes(vty, xpath_list);
 }
 
 
-static struct cmd_node vrf_node = {VRF_NODE, "%s(config-vrf)# ", 1};
+static struct cmd_node vrf_node = {
+	.name = "vrf",
+	.node = VRF_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-vrf)# ",
+};
 
 DEFUN_NOSH (vrf_netns,
        vrf_netns_cmd,
@@ -769,7 +804,9 @@ DEFUN_NOSH (vrf_netns,
 
 	frr_with_privs(vrf_daemon_privs) {
 		ret = vrf_netns_handler_create(vty, vrf, pathname,
-					       NS_UNKNOWN, NS_UNKNOWN);
+					       NS_UNKNOWN,
+					       NS_UNKNOWN,
+					       NS_UNKNOWN);
 	}
 	return ret;
 }
@@ -841,11 +878,17 @@ static int vrf_write_host(struct vty *vty)
 	return 1;
 }
 
-static struct cmd_node vrf_debug_node = {VRF_DEBUG_NODE, "", 1};
+static int vrf_write_host(struct vty *vty);
+static struct cmd_node vrf_debug_node = {
+	.name = "vrf debug",
+	.node = VRF_DEBUG_NODE,
+	.prompt = "",
+	.config_write = vrf_write_host,
+};
 
 void vrf_install_commands(void)
 {
-	install_node(&vrf_debug_node, vrf_write_host);
+	install_node(&vrf_debug_node);
 
 	install_element(CONFIG_NODE, &vrf_debug_cmd);
 	install_element(ENABLE_NODE, &vrf_debug_cmd);
@@ -858,7 +901,8 @@ void vrf_cmd_init(int (*writefunc)(struct vty *vty),
 {
 	install_element(CONFIG_NODE, &vrf_cmd);
 	install_element(CONFIG_NODE, &no_vrf_cmd);
-	install_node(&vrf_node, writefunc);
+	vrf_node.config_write = writefunc;
+	install_node(&vrf_node);
 	install_default(VRF_NODE);
 	install_element(VRF_NODE, &vrf_exit_cmd);
 	if (vrf_is_backend_netns() && ns_have_netns()) {
@@ -901,17 +945,6 @@ void vrf_set_default_name(const char *default_name, bool force)
 const char *vrf_get_default_name(void)
 {
 	return vrf_default_name;
-}
-
-vrf_id_t vrf_get_default_id(void)
-{
-	/* backend netns is only known by zebra
-	 * for other daemons, we return VRF_DEFAULT_INTERNAL
-	 */
-	if (vrf_is_backend_netns())
-		return ns_get_default_id();
-	else
-		return VRF_DEFAULT_INTERNAL;
 }
 
 int vrf_bind(vrf_id_t vrf_id, int fd, const char *name)
@@ -1012,3 +1045,145 @@ vrf_id_t vrf_generate_id(void)
 
 	return ++vrf_id_local;
 }
+
+/* ------- Northbound callbacks ------- */
+
+/*
+ * XPath: /frr-vrf:lib/vrf
+ */
+static int lib_vrf_create(struct nb_cb_create_args *args)
+{
+	const char *vrfname;
+	struct vrf *vrfp;
+
+	vrfname = yang_dnode_get_string(args->dnode, "./name");
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	vrfp = vrf_get(VRF_UNKNOWN, vrfname);
+
+	vrf_set_user_cfged(vrfp);
+	nb_running_set_entry(args->dnode, vrfp);
+
+	return NB_OK;
+}
+
+static int lib_vrf_destroy(struct nb_cb_destroy_args *args)
+{
+	struct vrf *vrfp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		vrfp = nb_running_get_entry(args->dnode, NULL, true);
+		if (CHECK_FLAG(vrfp->status, VRF_ACTIVE)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Only inactive VRFs can be deleted");
+			return NB_ERR_VALIDATION;
+		}
+		break;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		break;
+	case NB_EV_APPLY:
+		vrfp = nb_running_unset_entry(args->dnode);
+
+		/* Clear configured flag and invoke delete. */
+		vrf_reset_user_cfged(vrfp);
+		vrf_delete(vrfp);
+		break;
+	}
+
+	return NB_OK;
+}
+
+static const void *lib_vrf_get_next(struct nb_cb_get_next_args *args)
+{
+	struct vrf *vrfp = (struct vrf *)args->list_entry;
+
+	if (args->list_entry == NULL) {
+		vrfp = RB_MIN(vrf_name_head, &vrfs_by_name);
+	} else {
+		vrfp = RB_NEXT(vrf_name_head, vrfp);
+	}
+
+	return vrfp;
+}
+
+static int lib_vrf_get_keys(struct nb_cb_get_keys_args *args)
+{
+	struct vrf *vrfp = (struct vrf *)args->list_entry;
+
+	args->keys->num = 1;
+	strlcpy(args->keys->key[0], vrfp->name, sizeof(args->keys->key[0]));
+
+	return NB_OK;
+}
+
+static const void *lib_vrf_lookup_entry(struct nb_cb_lookup_entry_args *args)
+{
+	const char *vrfname = args->keys->key[0];
+
+	struct vrf *vrf = vrf_lookup_by_name(vrfname);
+
+	return vrf;
+}
+
+/*
+ * XPath: /frr-vrf:lib/vrf/id
+ */
+static struct yang_data *
+lib_vrf_state_id_get_elem(struct nb_cb_get_elem_args *args)
+{
+	struct vrf *vrfp = (struct vrf *)args->list_entry;
+
+	return yang_data_new_uint32(args->xpath, vrfp->vrf_id);
+}
+
+/*
+ * XPath: /frr-vrf:lib/vrf/active
+ */
+static struct yang_data *
+lib_vrf_state_active_get_elem(struct nb_cb_get_elem_args *args)
+{
+	struct vrf *vrfp = (struct vrf *)args->list_entry;
+
+	if (vrfp->status == VRF_ACTIVE)
+		return yang_data_new_bool(
+			args->xpath, vrfp->status == VRF_ACTIVE ? true : false);
+
+	return NULL;
+}
+
+/* clang-format off */
+const struct frr_yang_module_info frr_vrf_info = {
+	.name = "frr-vrf",
+	.nodes = {
+		{
+			.xpath = "/frr-vrf:lib/vrf",
+			.cbs = {
+				.create = lib_vrf_create,
+				.destroy = lib_vrf_destroy,
+				.get_next = lib_vrf_get_next,
+				.get_keys = lib_vrf_get_keys,
+				.lookup_entry = lib_vrf_lookup_entry,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/state/id",
+			.cbs = {
+				.get_elem = lib_vrf_state_id_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/state/active",
+			.cbs = {
+				.get_elem = lib_vrf_state_active_get_elem,
+			}
+		},
+		{
+			.xpath = NULL,
+		},
+	}
+};
+

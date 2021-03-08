@@ -79,6 +79,7 @@ If you prefer to manually build FRR, then use the following suggested config:
        --sysconfdir=/etc/frr \
        --enable-vtysh \
        --enable-pimd \
+       --enable-sharpd \
        --enable-multipath=64 \
        --enable-user=frr \
        --enable-group=frr \
@@ -359,7 +360,14 @@ This is the recommended test writing routine:
 - Write a topology (Graphviz recommended)
 - Obtain configuration files
 - Write the test itself
+- Format the new code using `black <https://github.com/psf/black>`_
 - Create a Pull Request
+
+.. Note::
+
+   BGP tests MUST use generous convergence timeouts - you must ensure
+   that any test involving BGP uses a convergence timeout of at least
+   130 seconds.
 
 Topotest File Hierarchy
 """""""""""""""""""""""
@@ -759,6 +767,8 @@ Requirements:
   inside folders named after the equipment.
 - Tests must be able to run without any interaction. To make sure your test
   conforms with this, run it without the :option:`-s` parameter.
+- Use `black <https://github.com/psf/black>`_ code formatter before creating
+  a pull request. This ensures we have a unified code style.
 
 Tips:
 

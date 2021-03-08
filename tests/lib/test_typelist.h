@@ -25,7 +25,9 @@
 #define list_hash	concat(TYPE, _hash)
 #define list_init	concat(TYPE, _init)
 #define list_fini	concat(TYPE, _fini)
+#define list_const_first concat(TYPE, _const_first)
 #define list_first	concat(TYPE, _first)
+#define list_const_next	concat(TYPE, _const_next)
 #define list_next	concat(TYPE, _next)
 #define list_next_safe	concat(TYPE, _next_safe)
 #define list_count	concat(TYPE, _count)
@@ -123,10 +125,10 @@ static void ts_hash(const char *text, const char *expect)
 	for (i = 0; i < sizeof(hash); i++)
 		sprintf(hashtext + i * 2, "%02x", hash[i]);
 
-	printf("%7"PRId64"us  %-25s %s%s\n", us, text,
+	printfrr("%7"PRId64"us  %-25s %s%s\n", us, text,
 	       expect ? " " : "*", hashtext);
 	if (expect && strcmp(expect, hashtext)) {
-		printf("%-21s %s\n", "EXPECTED:", expect);
+		printfrr("%-21s %s\n", "EXPECTED:", expect);
 		assert(0);
 	}
 	monotime(&ref);
@@ -149,7 +151,7 @@ static void concat(test_, TYPE)(void)
 	for (i = 0; i < NITEM; i++)
 		itm[i].val = i;
 
-	printf("%s start\n", str(TYPE));
+	printfrr("%s start\n", str(TYPE));
 	ts_start();
 
 	list_init(&head);
@@ -177,18 +179,29 @@ static void concat(test_, TYPE)(void)
 	ts_hashx("fill", "a538546a6e6ab0484e925940aa8dd02fd934408bbaed8cb66a0721841584d838");
 
 	k = 0;
-	prev = NULL;
-	frr_each(list, &head, item) {
+
+#if IS_ATOMIC(REALTYPE)
+	struct list_head *chead = &head;
+	struct item *citem, *cprev = NULL;
+
+	frr_each(list, chead, citem) {
+#else
+	const struct list_head *chead = &head;
+	const struct item *citem, *cprev = NULL;
+
+	frr_each(list_const, chead, citem) {
+#endif
+
 #if IS_HASH(REALTYPE) || IS_HEAP(REALTYPE)
 		/* hash table doesn't give sorting */
-		(void)prev;
+		(void)cprev;
 #else
-		assert(!prev || prev->val < item->val);
+		assert(!cprev || cprev->val < citem->val);
 #endif
-		prev = item;
+		cprev = citem;
 		k++;
 	}
-	assert(list_count(&head) == k);
+	assert(list_count(chead) == k);
 	ts_ref("walk");
 
 #if IS_UNIQ(REALTYPE)
@@ -530,7 +543,7 @@ static void concat(test_, TYPE)(void)
 	list_fini(&head);
 	ts_ref("fini");
 	ts_end();
-	printf("%s end\n", str(TYPE));
+	printfrr("%s end\n", str(TYPE));
 }
 
 #undef ts_hashx

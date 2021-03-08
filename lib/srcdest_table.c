@@ -4,7 +4,7 @@
  * Copyright (C) 2017 by David Lamparter & Christian Franke,
  *                       Open Source Routing / NetDEF Inc.
  *
- * This file is part of FreeRangeRouting (FRR)
+ * This file is part of FRRouting (FRR)
  *
  * FRR is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -316,4 +316,14 @@ static ssize_t printfrr_rn(char *buf, size_t bsz, const char *fmt,
 	srcdest_rnode_prefixes(rn, &dst_p, &src_p);
 	srcdest2str(dst_p, (const struct prefix_ipv6 *)src_p, buf, bsz);
 	return 2;
+}
+
+struct route_table *srcdest_srcnode_table(struct route_node *rn)
+{
+	if (rnode_is_dstnode(rn)) {
+		struct srcdest_rnode *srn = srcdest_rnode_from_rnode(rn);
+
+		return srn->src_table;
+	}
+	return NULL;
 }

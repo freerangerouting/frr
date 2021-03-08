@@ -29,6 +29,7 @@
 #include "hash.h"
 #include "if.h"
 #include "command.h"
+#include "network.h"
 
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
@@ -189,7 +190,7 @@ const char *nlpid2str(uint8_t nlpid)
 	case NLPID_ESIS:
 		return "ES-IS";
 	default:
-		snprintf(buf, sizeof(buf), "%" PRIu8, nlpid);
+		snprintf(buf, sizeof(buf), "%hhu", nlpid);
 		return buf;
 	}
 }
@@ -413,7 +414,7 @@ unsigned long isis_jitter(unsigned long timer, unsigned long jitter)
 	 * most IS-IS timers are no longer than 16 bit
 	 */
 
-	j = 1 + (int)((RANDOM_SPREAD * random()) / (RAND_MAX + 1.0));
+	j = 1 + (int)((RANDOM_SPREAD * frr_weak_random()) / (RAND_MAX + 1.0));
 
 	k = timer - (timer * (100 - jitter)) / 100;
 
@@ -439,12 +440,14 @@ struct in_addr newprefix2inaddr(uint8_t *prefix_start, uint8_t prefix_masklen)
 const char *print_sys_hostname(const uint8_t *sysid)
 {
 	struct isis_dynhn *dyn;
+	struct isis *isis = NULL;
 
 	if (!sysid)
 		return "nullsysid";
 
 	/* For our system ID return our host name */
-	if (memcmp(sysid, isis->sysid, ISIS_SYS_ID_LEN) == 0)
+	isis = isis_lookup_by_sysid(sysid);
+	if (isis && !CHECK_FLAG(im->options, F_ISIS_UNIT_TEST))
 		return cmd_hostname_get();
 
 	dyn = dynhn_find_by_id(sysid);
@@ -537,6 +540,26 @@ void log_multiline(int priority, const char *prefix, const char *format, ...)
 		XFREE(MTYPE_TMP, p);
 }
 
+char *log_uptime(time_t uptime, char *buf, size_t nbuf)
+{
+	struct tm *tm;
+	time_t difftime = time(NULL);
+	difftime -= uptime;
+	tm = gmtime(&difftime);
+
+	if (difftime < ONE_DAY_SECOND)
+		snprintf(buf, nbuf, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min,
+			 tm->tm_sec);
+	else if (difftime < ONE_WEEK_SECOND)
+		snprintf(buf, nbuf, "%dd%02dh%02dm", tm->tm_yday, tm->tm_hour,
+			 tm->tm_min);
+	else
+		snprintf(buf, nbuf, "%02dw%dd%02dh", tm->tm_yday / 7,
+			 tm->tm_yday - ((tm->tm_yday / 7) * 7), tm->tm_hour);
+
+	return buf;
+}
+
 void vty_multiline(struct vty *vty, const char *prefix, const char *format, ...)
 {
 	char shortbuf[256];
@@ -562,19 +585,12 @@ void vty_multiline(struct vty *vty, const char *prefix, const char *format, ...)
 
 void vty_out_timestr(struct vty *vty, time_t uptime)
 {
-	struct tm *tm;
 	time_t difftime = time(NULL);
-	difftime -= uptime;
-	tm = gmtime(&difftime);
+	char buf[MONOTIME_STRLEN];
 
-	if (difftime < ONE_DAY_SECOND)
-		vty_out(vty, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min,
-			tm->tm_sec);
-	else if (difftime < ONE_WEEK_SECOND)
-		vty_out(vty, "%dd%02dh%02dm", tm->tm_yday, tm->tm_hour,
-			tm->tm_min);
-	else
-		vty_out(vty, "%02dw%dd%02dh", tm->tm_yday / 7,
-			tm->tm_yday - ((tm->tm_yday / 7) * 7), tm->tm_hour);
-	vty_out(vty, " ago");
+	difftime -= uptime;
+
+	frrtime_to_interval(difftime, buf, sizeof(buf));
+
+	vty_out(vty, "%s ago", buf);
 }

@@ -154,7 +154,7 @@ void show_ip_eigrp_interface_header(struct vty *vty, struct eigrp *eigrp)
 {
 
 	vty_out(vty,
-		"\nEIGRP interfaces for AS(%d)\n\n %-10s %-10s %-10s %-6s %-12s %-7s %-14s %-12s %-8s %-8s %-8s\n %-39s %-12s %-7s %-14s %-12s %-8s\n",
+		"\nEIGRP interfaces for AS(%d)\n\n%-16s %-10s %-10s %-6s %-12s %-7s %-14s %-12s %-8s %-8s %-8s\n %-44s %-12s %-7s %-14s %-12s %-8s\n",
 		eigrp->AS, "Interface", "Bandwidth", "Delay", "Peers",
 		"Xmit Queue", "Mean", "Pacing Time", "Multicast", "Pending",
 		"Hello", "Holdtime", "", "Un/Reliable", "SRTT", "Un/Reliable",
@@ -164,7 +164,7 @@ void show_ip_eigrp_interface_header(struct vty *vty, struct eigrp *eigrp)
 void show_ip_eigrp_interface_sub(struct vty *vty, struct eigrp *eigrp,
 				 struct eigrp_interface *ei)
 {
-	vty_out(vty, "%-11s ", IF_NAME(ei));
+	vty_out(vty, "%-16s ", IF_NAME(ei));
 	vty_out(vty, "%-11u", ei->params.bandwidth);
 	vty_out(vty, "%-11u", ei->params.delay);
 	vty_out(vty, "%-7u", ei->nbrs->count);
@@ -234,8 +234,7 @@ void show_ip_eigrp_topology_header(struct vty *vty, struct eigrp *eigrp)
 	vty_out(vty, "\nEIGRP Topology Table for AS(%d)/ID(%s)\n\n", eigrp->AS,
 		inet_ntoa(eigrp->router_id));
 	vty_out(vty,
-		"Codes: P - Passive, A - Active, U - Update, Q - Query, "
-		"R - Reply\n       r - reply Status, s - sia Status\n\n");
+		"Codes: P - Passive, A - Active, U - Update, Q - Query, R - Reply\n       r - reply Status, s - sia Status\n\n");
 }
 
 void show_ip_eigrp_prefix_entry(struct vty *vty, struct eigrp_prefix_entry *tn)
@@ -555,14 +554,18 @@ DEFUN (no_debug_eigrp_packets,
 }
 
 /* Debug node. */
+static int config_write_debug(struct vty *vty);
 static struct cmd_node eigrp_debug_node = {
-	DEBUG_NODE, "", 1 /* VTYSH */
+	.name = "debug",
+	.node = DEBUG_NODE,
+	.prompt = "",
+	.config_write = config_write_debug,
 };
 
 /* Initialize debug commands. */
 void eigrp_debug_init(void)
 {
-	install_node(&eigrp_debug_node, config_write_debug);
+	install_node(&eigrp_debug_node);
 
 	install_element(ENABLE_NODE, &show_debugging_eigrp_cmd);
 	install_element(ENABLE_NODE, &debug_eigrp_packets_all_cmd);

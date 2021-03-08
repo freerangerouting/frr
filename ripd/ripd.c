@@ -44,6 +44,7 @@
 #include "privs.h"
 #include "lib_errors.h"
 #include "northbound_cli.h"
+#include "network.h"
 
 #include "ripd/ripd.h"
 #include "ripd/rip_nb.h"
@@ -104,7 +105,7 @@ static int sockopt_broadcast(int sock)
 	int on = 1;
 
 	ret = setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char *)&on,
-			 sizeof on);
+			 sizeof(on));
 	if (ret < 0) {
 		zlog_warn("can't set sockopt SO_BROADCAST to socket %d", sock);
 		return -1;
@@ -741,8 +742,7 @@ static void rip_packet_dump(struct rip_packet *packet, int size,
 						ntohs(md5->family),
 						ntohs(md5->type));
 					zlog_debug(
-						"    RIP-2 packet len %d Key ID %d"
-						" Auth Data len %d",
+						"    RIP-2 packet len %d Key ID %d Auth Data len %d",
 						ntohs(md5->packet_len),
 						md5->keyid, md5->auth_len);
 					zlog_debug("    Sequence Number %ld",
@@ -756,8 +756,7 @@ static void rip_packet_dump(struct rip_packet *packet, int size,
 						ntohs(rte->family),
 						ntohs(rte->tag));
 					zlog_debug(
-						"    MD5: %02X%02X%02X%02X%02X%02X%02X%02X"
-						"%02X%02X%02X%02X%02X%02X%02X%02X",
+						"    MD5: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
 						p[0], p[1], p[2], p[3], p[4],
 						p[5], p[6], p[7], p[8], p[9],
 						p[10], p[11], p[12], p[13],
@@ -903,8 +902,7 @@ static int rip_auth_md5(struct rip_packet *packet, struct sockaddr_in *from,
 	      || (md5->auth_len == RIP_AUTH_MD5_COMPAT_SIZE))) {
 		if (IS_RIP_DEBUG_EVENT)
 			zlog_debug(
-				"RIPv2 MD5 authentication, strange authentication "
-				"length field %d",
+				"RIPv2 MD5 authentication, strange authentication length field %d",
 				md5->auth_len);
 		return 0;
 	}
@@ -915,8 +913,7 @@ static int rip_auth_md5(struct rip_packet *packet, struct sockaddr_in *from,
 	if (packet_len > (length - RIP_HEADER_SIZE - RIP_AUTH_MD5_SIZE)) {
 		if (IS_RIP_DEBUG_EVENT)
 			zlog_debug(
-				"RIPv2 MD5 authentication, packet length field %d "
-				"greater than received length %d!",
+				"RIPv2 MD5 authentication, packet length field %d greater than received length %d!",
 				md5->packet_len, length);
 		return 0;
 	}
@@ -1223,7 +1220,8 @@ static void rip_response_process(struct rip_packet *packet, int size,
 		}
 
 		/* RIPv1 does not have nexthop value. */
-		if (packet->version == RIPv1 && rte->nexthop.s_addr != 0) {
+		if (packet->version == RIPv1
+		    && rte->nexthop.s_addr != INADDR_ANY) {
 			zlog_info("RIPv1 packet with nexthop value %s",
 				  inet_ntoa(rte->nexthop));
 			rip_peer_bad_route(rip, from);
@@ -1234,7 +1232,8 @@ static void rip_response_process(struct rip_packet *packet, int size,
 		   sub-optimal, but absolutely valid, route may be taken.  If
 		   the received Next Hop is not directly reachable, it should be
 		   treated as 0.0.0.0. */
-		if (packet->version == RIPv2 && rte->nexthop.s_addr != 0) {
+		if (packet->version == RIPv2
+		    && rte->nexthop.s_addr != INADDR_ANY) {
 			uint32_t addrval;
 
 			/* Multicast address check. */
@@ -1272,7 +1271,8 @@ static void rip_response_process(struct rip_packet *packet, int size,
 								"Next hop %s is not directly reachable. Treat it as 0.0.0.0",
 								inet_ntoa(
 									rte->nexthop));
-						rte->nexthop.s_addr = 0;
+						rte->nexthop.s_addr =
+							INADDR_ANY;
 					}
 
 					route_unlock_node(rn);
@@ -1282,7 +1282,7 @@ static void rip_response_process(struct rip_packet *packet, int size,
 							"Next hop %s is not directly reachable. Treat it as 0.0.0.0",
 							inet_ntoa(
 								rte->nexthop));
-					rte->nexthop.s_addr = 0;
+					rte->nexthop.s_addr = INADDR_ANY;
 				}
 			}
 		}
@@ -1297,10 +1297,11 @@ static void rip_response_process(struct rip_packet *packet, int size,
 		   (/16 for class B's) except when the RIP packet does to inside
 		   the classful network in question.  */
 
-		if ((packet->version == RIPv1 && rte->prefix.s_addr != 0)
+		if ((packet->version == RIPv1
+		     && rte->prefix.s_addr != INADDR_ANY)
 		    || (packet->version == RIPv2
-			&& (rte->prefix.s_addr != 0
-			    && rte->mask.s_addr == 0))) {
+			&& (rte->prefix.s_addr != INADDR_ANY
+			    && rte->mask.s_addr == INADDR_ANY))) {
 			uint32_t destination;
 
 			if (subnetted == -1) {
@@ -1352,7 +1353,8 @@ static void rip_response_process(struct rip_packet *packet, int size,
 
 		/* In case of RIPv2, if prefix in RTE is not netmask applied one
 		   ignore the entry.  */
-		if ((packet->version == RIPv2) && (rte->mask.s_addr != 0)
+		if ((packet->version == RIPv2)
+		    && (rte->mask.s_addr != INADDR_ANY)
 		    && ((rte->prefix.s_addr & rte->mask.s_addr)
 			!= rte->prefix.s_addr)) {
 			zlog_warn(
@@ -1363,12 +1365,13 @@ static void rip_response_process(struct rip_packet *packet, int size,
 		}
 
 		/* Default route's netmask is ignored. */
-		if (packet->version == RIPv2 && (rte->prefix.s_addr == 0)
-		    && (rte->mask.s_addr != 0)) {
+		if (packet->version == RIPv2
+		    && (rte->prefix.s_addr == INADDR_ANY)
+		    && (rte->mask.s_addr != INADDR_ANY)) {
 			if (IS_RIP_DEBUG_EVENT)
 				zlog_debug(
 					"Default route with non-zero netmask.  Set zero to netmask");
-			rte->mask.s_addr = 0;
+			rte->mask.s_addr = INADDR_ANY;
 		}
 
 		/* Routing table updates. */
@@ -1638,8 +1641,7 @@ void rip_redistribute_delete(struct rip *rip, int type, int sub_type,
 
 				if (IS_RIP_DEBUG_EVENT)
 					zlog_debug(
-						"Poison %s/%d on the interface %s with an "
-						"infinity metric [delete]",
+						"Poison %s/%d on the interface %s with an infinity metric [delete]",
 						inet_ntoa(p->prefix),
 						p->prefixlen,
 						ifindex2ifname(
@@ -1807,8 +1809,7 @@ static int rip_read(struct thread *t)
 
 	if (ifc == NULL) {
 		zlog_info(
-			"rip_read: cannot find connected address for packet from %s "
-			"port %d on interface %s (VRF %s)",
+			"rip_read: cannot find connected address for packet from %s port %d on interface %s (VRF %s)",
 			inet_ntoa(from.sin_addr), ntohs(from.sin_port),
 			ifp->name, rip->vrf_name);
 		return -1;
@@ -1930,8 +1931,7 @@ static int rip_read(struct thread *t)
 		if (packet->command != RIP_REQUEST) {
 			if (IS_RIP_DEBUG_PACKET)
 				zlog_debug(
-					"RIPv1"
-					" dropped because authentication enabled");
+					"RIPv1 dropped because authentication enabled");
 			ripd_notif_send_auth_type_failure(ifp->name);
 			rip_peer_bad_packet(rip, &from);
 			return -1;
@@ -1954,8 +1954,7 @@ static int rip_read(struct thread *t)
 		if (packet->rte->family != htons(RIP_FAMILY_AUTH)) {
 			if (IS_RIP_DEBUG_PACKET)
 				zlog_debug(
-					"RIPv2"
-					" dropped because authentication enabled");
+					"RIPv2 dropped because authentication enabled");
 			ripd_notif_send_auth_type_failure(ifp->name);
 			rip_peer_bad_packet(rip, &from);
 			return -1;
@@ -2641,7 +2640,7 @@ static int rip_triggered_update(struct thread *t)
 	 random interval between 1 and 5 seconds.  If other changes that
 	 would trigger updates occur before the timer expires, a single
 	 update is triggered when the timer expires. */
-	interval = (random() % 5) + 1;
+	interval = (frr_weak_random() % 5) + 1;
 
 	rip->t_triggered_interval = NULL;
 	thread_add_timer(master, rip_triggered_interval, rip, interval,
@@ -2838,7 +2837,8 @@ static int rip_update_jitter(unsigned long time)
 	if (jitter_input < JITTER_BOUND)
 		jitter_input = JITTER_BOUND;
 
-	jitter = (((random() % ((jitter_input * 2) + 1)) - jitter_input));
+	jitter = (((frr_weak_random() % ((jitter_input * 2) + 1))
+		   - jitter_input));
 
 	return jitter / JITTER_BOUND;
 }
@@ -2966,8 +2966,8 @@ static void rip_distance_show(struct vty *vty, struct rip *rip)
 					"    Address           Distance  List\n");
 				header = 0;
 			}
-			sprintf(buf, "%s/%d", inet_ntoa(rn->p.u.prefix4),
-				rn->p.prefixlen);
+			snprintf(buf, sizeof(buf), "%s/%d",
+				 inet_ntoa(rn->p.u.prefix4), rn->p.prefixlen);
 			vty_out(vty, "    %-20s  %4d  %s\n", buf,
 				rdistance->distance,
 				rdistance->access_list ? rdistance->access_list
@@ -3014,20 +3014,20 @@ void rip_ecmp_disable(struct rip *rip)
 static void rip_vty_out_uptime(struct vty *vty, struct rip_info *rinfo)
 {
 	time_t clock;
-	struct tm *tm;
+	struct tm tm;
 #define TIME_BUF 25
 	char timebuf[TIME_BUF];
 	struct thread *thread;
 
 	if ((thread = rinfo->t_timeout) != NULL) {
 		clock = thread_timer_remain_second(thread);
-		tm = gmtime(&clock);
-		strftime(timebuf, TIME_BUF, "%M:%S", tm);
+		gmtime_r(&clock, &tm);
+		strftime(timebuf, TIME_BUF, "%M:%S", &tm);
 		vty_out(vty, "%5s", timebuf);
 	} else if ((thread = rinfo->t_garbage_collect) != NULL) {
 		clock = thread_timer_remain_second(thread);
-		tm = gmtime(&clock);
-		strftime(timebuf, TIME_BUF, "%M:%S", tm);
+		gmtime_r(&clock, &tm);
+		strftime(timebuf, TIME_BUF, "%M:%S", &tm);
 		vty_out(vty, "%5s", timebuf);
 	}
 }
@@ -3321,8 +3321,15 @@ static int config_write_rip(struct vty *vty)
 	return write;
 }
 
+static int config_write_rip(struct vty *vty);
 /* RIP node structure. */
-static struct cmd_node rip_node = {RIP_NODE, "%s(config-router)# ", 1};
+static struct cmd_node rip_node = {
+	.name = "rip",
+	.node = RIP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-router)# ",
+	.config_write = config_write_rip,
+};
 
 /* Distribute-list update functions. */
 static void rip_distribute_update(struct distribute_ctx *ctx,
@@ -3415,6 +3422,8 @@ static void rip_distribute_update_all_wrapper(struct access_list *notused)
 /* Delete all added rip route. */
 void rip_clean(struct rip *rip)
 {
+	rip_interfaces_clean(rip);
+
 	if (rip->enabled)
 		rip_instance_disable(rip);
 
@@ -3436,7 +3445,6 @@ void rip_clean(struct rip *rip)
 	route_table_finish(rip->enable_network);
 	vector_free(rip->passive_nondefault);
 	list_delete(&rip->offset_list_master);
-	rip_interfaces_clean(rip);
 	route_table_finish(rip->distance_table);
 
 	RB_REMOVE(rip_instance_head, &rip_instances, rip);
@@ -3660,18 +3668,24 @@ static int rip_vrf_enable(struct vrf *vrf)
 		 */
 		if (yang_module_find("frr-ripd") && old_vrf_name) {
 			struct lyd_node *rip_dnode;
+			char oldpath[XPATH_MAXLEN];
+			char newpath[XPATH_MAXLEN];
 
 			rip_dnode = yang_dnode_get(
 				running_config->dnode,
 				"/frr-ripd:ripd/instance[vrf='%s']/vrf",
 				old_vrf_name);
 			if (rip_dnode) {
+				yang_dnode_get_path(rip_dnode->parent, oldpath,
+						    sizeof(oldpath));
 				yang_dnode_change_leaf(rip_dnode, vrf->name);
+				yang_dnode_get_path(rip_dnode->parent, newpath,
+						    sizeof(newpath));
+				nb_running_move_tree(oldpath, newpath);
 				running_config->version++;
 			}
 		}
-		if (old_vrf_name)
-			XFREE(MTYPE_RIP_VRF_NAME, old_vrf_name);
+		XFREE(MTYPE_RIP_VRF_NAME, old_vrf_name);
 	}
 	if (!rip || rip->enabled)
 		return 0;
@@ -3726,7 +3740,7 @@ void rip_vrf_terminate(void)
 void rip_init(void)
 {
 	/* Install top nodes. */
-	install_node(&rip_node, config_write_rip);
+	install_node(&rip_node);
 
 	/* Install rip commands. */
 	install_element(VIEW_NODE, &show_ip_rip_cmd);

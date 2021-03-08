@@ -115,6 +115,15 @@ static int zebra_mlag_read(struct thread *thread)
 	/* This will be the actual length of the packet */
 	tot_len = h_msglen + ZEBRA_MLAG_LEN_SIZE;
 
+	/*
+	 * If the buffer read we are about to do is too large
+	 * we are really really really not double plus good
+	 *
+	 * I'm not sure what to do here other than to bail
+	 * We'll need to revisit this in the future.
+	 */
+	assert(tot_len < ZEBRA_MLAG_BUF_LIMIT);
+
 	if (curr_len < tot_len) {
 		ssize_t data_len;
 
@@ -157,8 +166,6 @@ static int zebra_mlag_read(struct thread *thread)
 static int zebra_mlag_connect(struct thread *thread)
 {
 	struct sockaddr_un svr = {0};
-	struct ucred ucred;
-	socklen_t len = 0;
 
 	/* Reset the Timer-running flag */
 	zrouter.mlag_info.timer_running = false;
@@ -182,11 +189,8 @@ static int zebra_mlag_connect(struct thread *thread)
 				 &zrouter.mlag_info.t_read);
 		return 0;
 	}
-	len = sizeof(struct ucred);
-	ucred.pid = getpid();
 
 	set_nonblocking(mlag_socket);
-	setsockopt(mlag_socket, SOL_SOCKET, SO_PEERCRED, &ucred, len);
 
 	if (IS_ZEBRA_DEBUG_MLAG)
 		zlog_debug("%s: Connection with MLAG is established ",

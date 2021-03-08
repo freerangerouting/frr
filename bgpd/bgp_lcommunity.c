@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2016 Keyur Patel <keyur@arrcus.com>
  *
- * This file is part of FreeRangeRouting (FRR).
+ * This file is part of FRRouting (FRR).
  *
  * FRR is free software; you can redistribute it and/or modify it under the
  * terms of the GNU General Public License as published by the Free Software
@@ -49,6 +49,8 @@ void lcommunity_free(struct lcommunity **lcom)
 
 	XFREE(MTYPE_LCOMMUNITY_VAL, (*lcom)->val);
 	XFREE(MTYPE_LCOMMUNITY_STR, (*lcom)->str);
+	if ((*lcom)->json)
+		json_object_free((*lcom)->json);
 	XFREE(MTYPE_LCOMMUNITY, *lcom);
 }
 
@@ -62,8 +64,8 @@ static void lcommunity_hash_free(struct lcommunity *lcom)
    structure, we don't add the value.  Newly added value is sorted by
    numerical order.  When the value is added to the structure return 1
    else return 0.  */
-static int lcommunity_add_val(struct lcommunity *lcom,
-			      struct lcommunity_val *lval)
+static bool lcommunity_add_val(struct lcommunity *lcom,
+			       struct lcommunity_val *lval)
 {
 	uint8_t *p;
 	int ret;
@@ -74,7 +76,7 @@ static int lcommunity_add_val(struct lcommunity *lcom,
 		lcom->size++;
 		lcom->val = XMALLOC(MTYPE_LCOMMUNITY_VAL, lcom_length(lcom));
 		memcpy(lcom->val, lval->val, LCOMMUNITY_SIZE);
-		return 1;
+		return true;
 	}
 
 	/* If the value already exists in the structure return 0.  */
@@ -82,7 +84,7 @@ static int lcommunity_add_val(struct lcommunity *lcom,
 	for (p = lcom->val; c < lcom->size; p += LCOMMUNITY_SIZE, c++) {
 		ret = memcmp(p, lval->val, LCOMMUNITY_SIZE);
 		if (ret == 0)
-			return 0;
+			return false;
 		if (ret > 0)
 			break;
 	}
@@ -97,7 +99,7 @@ static int lcommunity_add_val(struct lcommunity *lcom,
 		(lcom->size - 1 - c) * LCOMMUNITY_SIZE);
 	memcpy(lcom->val + c * LCOMMUNITY_SIZE, lval->val, LCOMMUNITY_SIZE);
 
-	return 1;
+	return true;
 }
 
 /* This function takes pointer to Large Communites strucutre then
@@ -181,7 +183,7 @@ static void set_lcommunity_string(struct lcommunity *lcom, bool make_json)
 	int i;
 	int len;
 	char *str_buf;
-	uint8_t *pnt;
+	const uint8_t *pnt;
 	uint32_t global, local1, local2;
 	json_object *json_lcommunity_list = NULL;
 	json_object *json_string = NULL;
@@ -346,16 +348,12 @@ void lcommunity_finish(void)
 	lcomhash = NULL;
 }
 
-/* Large Communities token enum. */
-enum lcommunity_token {
-	lcommunity_token_unknown = 0,
-	lcommunity_token_val,
-};
-
-/* Get next Large Communities token from the string. */
+/* Get next Large Communities token from the string.
+ * Assumes str is space-delimeted and describes 0 or more
+ * valid large communities
+ */
 static const char *lcommunity_gettoken(const char *str,
-				       struct lcommunity_val *lval,
-				       enum lcommunity_token *token)
+				       struct lcommunity_val *lval)
 {
 	const char *p = str;
 
@@ -370,60 +368,55 @@ static const char *lcommunity_gettoken(const char *str,
 		return NULL;
 
 	/* Community value. */
-	if (isdigit((unsigned char)*p)) {
-		int separator = 0;
-		int digit = 0;
-		uint32_t globaladmin = 0;
-		uint32_t localdata1 = 0;
-		uint32_t localdata2 = 0;
+	int separator = 0;
+	int digit = 0;
+	uint32_t globaladmin = 0;
+	uint32_t localdata1 = 0;
+	uint32_t localdata2 = 0;
 
-		while (isdigit((unsigned char)*p) || *p == ':') {
-			if (*p == ':') {
-				if (separator == 2) {
-					*token = lcommunity_token_unknown;
-					return NULL;
-				} else {
-					separator++;
-					digit = 0;
-					if (separator == 1) {
-						globaladmin = localdata2;
-					} else {
-						localdata1 = localdata2;
-					}
-					localdata2 = 0;
-				}
+	while (*p && *p != ' ') {
+		/* large community valid chars */
+		assert(isdigit((unsigned char)*p) || *p == ':');
+
+		if (*p == ':') {
+			separator++;
+			digit = 0;
+			if (separator == 1) {
+				globaladmin = localdata2;
 			} else {
-				digit = 1;
-				localdata2 *= 10;
-				localdata2 += (*p - '0');
+				localdata1 = localdata2;
 			}
-			p++;
+			localdata2 = 0;
+		} else {
+			digit = 1;
+			/* left shift the accumulated value and add current
+			 * digit
+			 */
+			localdata2 *= 10;
+			localdata2 += (*p - '0');
 		}
-		if (!digit) {
-			*token = lcommunity_token_unknown;
-			return NULL;
-		}
-
-		/*
-		 * Copy the large comm.
-		 */
-		lval->val[0] = (globaladmin >> 24) & 0xff;
-		lval->val[1] = (globaladmin >> 16) & 0xff;
-		lval->val[2] = (globaladmin >> 8) & 0xff;
-		lval->val[3] = globaladmin & 0xff;
-		lval->val[4] = (localdata1 >> 24) & 0xff;
-		lval->val[5] = (localdata1 >> 16) & 0xff;
-		lval->val[6] = (localdata1 >> 8) & 0xff;
-		lval->val[7] = localdata1 & 0xff;
-		lval->val[8] = (localdata2 >> 24) & 0xff;
-		lval->val[9] = (localdata2 >> 16) & 0xff;
-		lval->val[10] = (localdata2 >> 8) & 0xff;
-		lval->val[11] = localdata2 & 0xff;
-
-		*token = lcommunity_token_val;
-		return p;
+		p++;
 	}
-	*token = lcommunity_token_unknown;
+
+	/* Assert str was a valid large community */
+	assert(separator == 2 && digit == 1);
+
+	/*
+	 * Copy the large comm.
+	 */
+	lval->val[0] = (globaladmin >> 24) & 0xff;
+	lval->val[1] = (globaladmin >> 16) & 0xff;
+	lval->val[2] = (globaladmin >> 8) & 0xff;
+	lval->val[3] = globaladmin & 0xff;
+	lval->val[4] = (localdata1 >> 24) & 0xff;
+	lval->val[5] = (localdata1 >> 16) & 0xff;
+	lval->val[6] = (localdata1 >> 8) & 0xff;
+	lval->val[7] = localdata1 & 0xff;
+	lval->val[8] = (localdata2 >> 24) & 0xff;
+	lval->val[9] = (localdata2 >> 16) & 0xff;
+	lval->val[10] = (localdata2 >> 8) & 0xff;
+	lval->val[11] = localdata2 & 0xff;
+
 	return p;
 }
 
@@ -437,29 +430,22 @@ static const char *lcommunity_gettoken(const char *str,
 struct lcommunity *lcommunity_str2com(const char *str)
 {
 	struct lcommunity *lcom = NULL;
-	enum lcommunity_token token = lcommunity_token_unknown;
 	struct lcommunity_val lval;
 
+	if (!lcommunity_list_valid(str, LARGE_COMMUNITY_LIST_STANDARD))
+		return NULL;
+
 	do {
-		str = lcommunity_gettoken(str, &lval, &token);
-		switch (token) {
-		case lcommunity_token_val:
-			if (lcom == NULL)
-				lcom = lcommunity_new();
-			lcommunity_add_val(lcom, &lval);
-			break;
-		case lcommunity_token_unknown:
-		default:
-			if (lcom)
-				lcommunity_free(&lcom);
-			return NULL;
-		}
+		str = lcommunity_gettoken(str, &lval);
+		if (lcom == NULL)
+			lcom = lcommunity_new();
+		lcommunity_add_val(lcom, &lval);
 	} while (str);
 
 	return lcom;
 }
 
-int lcommunity_include(struct lcommunity *lcom, uint8_t *ptr)
+bool lcommunity_include(struct lcommunity *lcom, uint8_t *ptr)
 {
 	int i;
 	uint8_t *lcom_ptr;
@@ -467,25 +453,25 @@ int lcommunity_include(struct lcommunity *lcom, uint8_t *ptr)
 	for (i = 0; i < lcom->size; i++) {
 		lcom_ptr = lcom->val + (i * LCOMMUNITY_SIZE);
 		if (memcmp(ptr, lcom_ptr, LCOMMUNITY_SIZE) == 0)
-			return 1;
+			return true;
 	}
-	return 0;
+	return false;
 }
 
-int lcommunity_match(const struct lcommunity *lcom1,
-		     const struct lcommunity *lcom2)
+bool lcommunity_match(const struct lcommunity *lcom1,
+		      const struct lcommunity *lcom2)
 {
 	int i = 0;
 	int j = 0;
 
 	if (lcom1 == NULL && lcom2 == NULL)
-		return 1;
+		return true;
 
 	if (lcom1 == NULL || lcom2 == NULL)
-		return 0;
+		return false;
 
 	if (lcom1->size < lcom2->size)
-		return 0;
+		return false;
 
 	/* Every community on com2 needs to be on com1 for this to match */
 	while (i < lcom1->size && j < lcom2->size) {
@@ -497,9 +483,9 @@ int lcommunity_match(const struct lcommunity *lcom1,
 	}
 
 	if (j == lcom2->size)
-		return 1;
+		return true;
 	else
-		return 0;
+		return false;
 }
 
 /* Delete one lcommunity. */
@@ -530,7 +516,6 @@ void lcommunity_del_val(struct lcommunity *lcom, uint8_t *ptr)
 						 lcom->val, lcom_length(lcom));
 			else {
 				XFREE(MTYPE_LCOMMUNITY_VAL, lcom->val);
-				lcom->val = NULL;
 			}
 			return;
 		}
@@ -554,7 +539,7 @@ static void *bgp_aggr_lcommunty_hash_alloc(void *p)
 	return lcommunity;
 }
 
-static void bgp_aggr_lcommunity_prepare(struct hash_backet *hb, void *arg)
+static void bgp_aggr_lcommunity_prepare(struct hash_bucket *hb, void *arg)
 {
 	struct lcommunity *hb_lcommunity = hb->data;
 	struct lcommunity **aggr_lcommunity = arg;

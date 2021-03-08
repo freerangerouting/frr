@@ -143,7 +143,7 @@ struct if_stats {
 #define TE_EXT_MASK             0x0FFFFFFF
 #define TE_EXT_ANORMAL          0x80000000
 #define LOSS_PRECISION          0.000003
-#define TE_KILO_BIT             1000
+#define TE_MEGA_BIT             1000000
 #define TE_BYTE                 8
 #define DEFAULT_BANDWIDTH       10000
 #define MAX_CLASS_TYPE          8
@@ -224,6 +224,8 @@ struct interface {
 	   not work as expected.
 	 */
 	ifindex_t ifindex;
+	ifindex_t oldifindex;
+
 	/*
 	 * ifindex of parent interface, if any
 	 */
@@ -308,33 +310,58 @@ RB_HEAD(if_index_head, interface);
 RB_PROTOTYPE(if_index_head, interface, index_entry, if_cmp_index_func)
 DECLARE_QOBJ_TYPE(interface)
 
-#define IFNAME_RB_INSERT(vrf, ifp)                                             \
-	if (RB_INSERT(if_name_head, &vrf->ifaces_by_name, (ifp)))              \
-		flog_err(EC_LIB_INTERFACE,                                     \
-			 "%s(%s): corruption detected -- interface with this " \
-			 "name exists already in VRF %u!",                     \
-			 __func__, (ifp)->name, (ifp)->vrf_id);
+#define IFNAME_RB_INSERT(vrf, ifp)                                                    \
+	({                                                                            \
+		struct interface *_iz =                                               \
+			RB_INSERT(if_name_head, &vrf->ifaces_by_name, (ifp));         \
+		if (_iz)                                                              \
+			flog_err(                                                     \
+				EC_LIB_INTERFACE,                                     \
+				"%s(%s): corruption detected -- interface with this " \
+				"name exists already in VRF %u!",                     \
+				__func__, (ifp)->name, (ifp)->vrf_id);                \
+		_iz;                                                                  \
+	})
 
-#define IFNAME_RB_REMOVE(vrf, ifp)                                             \
-	if (RB_REMOVE(if_name_head, &vrf->ifaces_by_name, (ifp)) == NULL)      \
-		flog_err(EC_LIB_INTERFACE,                                     \
-			 "%s(%s): corruption detected -- interface with this " \
-			 "name doesn't exist in VRF %u!",                      \
-			 __func__, (ifp)->name, (ifp)->vrf_id);
+#define IFNAME_RB_REMOVE(vrf, ifp)                                                    \
+	({                                                                            \
+		struct interface *_iz =                                               \
+			RB_REMOVE(if_name_head, &vrf->ifaces_by_name, (ifp));         \
+		if (_iz == NULL)                                                      \
+			flog_err(                                                     \
+				EC_LIB_INTERFACE,                                     \
+				"%s(%s): corruption detected -- interface with this " \
+				"name doesn't exist in VRF %u!",                      \
+				__func__, (ifp)->name, (ifp)->vrf_id);                \
+		_iz;                                                                  \
+	})
 
-#define IFINDEX_RB_INSERT(vrf, ifp)                                            \
-	if (RB_INSERT(if_index_head, &vrf->ifaces_by_index, (ifp)))            \
-		flog_err(EC_LIB_INTERFACE,                                     \
-			 "%s(%u): corruption detected -- interface with this " \
-			 "ifindex exists already in VRF %u!",                  \
-			 __func__, (ifp)->ifindex, (ifp)->vrf_id);
 
-#define IFINDEX_RB_REMOVE(vrf, ifp)                                            \
-	if (RB_REMOVE(if_index_head, &vrf->ifaces_by_index, (ifp)) == NULL)    \
-		flog_err(EC_LIB_INTERFACE,                                     \
-			 "%s(%u): corruption detected -- interface with this " \
-			 "ifindex doesn't exist in VRF %u!",                   \
-			 __func__, (ifp)->ifindex, (ifp)->vrf_id);
+#define IFINDEX_RB_INSERT(vrf, ifp)                                                   \
+	({                                                                            \
+		struct interface *_iz = RB_INSERT(                                    \
+			if_index_head, &vrf->ifaces_by_index, (ifp));                 \
+		if (_iz)                                                              \
+			flog_err(                                                     \
+				EC_LIB_INTERFACE,                                     \
+				"%s(%u): corruption detected -- interface with this " \
+				"ifindex exists already in VRF %u!",                  \
+				__func__, (ifp)->ifindex, (ifp)->vrf_id);             \
+		_iz;                                                                  \
+	})
+
+#define IFINDEX_RB_REMOVE(vrf, ifp)                                                   \
+	({                                                                            \
+		struct interface *_iz = RB_REMOVE(                                    \
+			if_index_head, &vrf->ifaces_by_index, (ifp));                 \
+		if (_iz == NULL)                                                      \
+			flog_err(                                                     \
+				EC_LIB_INTERFACE,                                     \
+				"%s(%u): corruption detected -- interface with this " \
+				"ifindex doesn't exist in VRF %u!",                   \
+				__func__, (ifp)->ifindex, (ifp)->vrf_id);             \
+		_iz;                                                                  \
+	})
 
 #define FOR_ALL_INTERFACES(vrf, ifp)                                           \
 	if (vrf)                                                               \
@@ -487,22 +514,24 @@ extern struct interface *if_create_name(const char *name, vrf_id_t vrf_id);
 extern struct interface *if_create_ifindex(ifindex_t ifindex, vrf_id_t vrf_id);
 extern struct interface *if_lookup_by_index(ifindex_t, vrf_id_t vrf_id);
 extern struct interface *if_lookup_by_index_all_vrf(ifindex_t);
-extern struct interface *if_lookup_exact_address(void *matchaddr, int family,
-						 vrf_id_t vrf_id);
-extern struct connected *if_lookup_address(void *matchaddr, int family,
+extern struct interface *if_lookup_exact_address(const void *matchaddr,
+						 int family, vrf_id_t vrf_id);
+extern struct connected *if_lookup_address(const void *matchaddr, int family,
 					   vrf_id_t vrf_id);
-extern struct interface *if_lookup_prefix(struct prefix *prefix,
+extern struct interface *if_lookup_prefix(const struct prefix *prefix,
 					  vrf_id_t vrf_id);
 size_t if_lookup_by_hwaddr(const uint8_t *hw_addr, size_t addrsz,
 			   struct interface ***result, vrf_id_t vrf_id);
 
+struct vrf;
 extern struct interface *if_lookup_by_name_all_vrf(const char *ifname);
+extern struct interface *if_lookup_by_name_vrf(const char *name, struct vrf *vrf);
 extern struct interface *if_lookup_by_name(const char *ifname, vrf_id_t vrf_id);
 extern struct interface *if_get_by_name(const char *ifname, vrf_id_t vrf_id);
 extern struct interface *if_get_by_ifindex(ifindex_t ifindex, vrf_id_t vrf_id);
 
 /* Sets the index and adds to index list */
-extern void if_set_index(struct interface *ifp, ifindex_t ifindex);
+extern int if_set_index(struct interface *ifp, ifindex_t ifindex);
 /* Sets the name and adds to name list */
 extern void if_set_name(struct interface *ifp, const char *name);
 
@@ -525,7 +554,6 @@ extern bool if_is_loopback_or_vrf(const struct interface *ifp);
 extern int if_is_broadcast(const struct interface *ifp);
 extern int if_is_pointopoint(const struct interface *ifp);
 extern int if_is_multicast(const struct interface *ifp);
-struct vrf;
 extern void if_terminate(struct vrf *vrf);
 extern void if_dump_all(void);
 extern const char *if_flag_dump(unsigned long);
@@ -550,9 +578,9 @@ connected_add_by_prefix(struct interface *, struct prefix *, struct prefix *);
 extern struct connected *connected_delete_by_prefix(struct interface *,
 						    struct prefix *);
 extern struct connected *connected_lookup_prefix(struct interface *,
-						 struct prefix *);
+						 const struct prefix *);
 extern struct connected *connected_lookup_prefix_exact(struct interface *,
-						       struct prefix *);
+						       const struct prefix *);
 extern unsigned int connected_count_by_family(struct interface *, int family);
 extern struct nbr_connected *nbr_connected_new(void);
 extern void nbr_connected_free(struct nbr_connected *);

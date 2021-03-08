@@ -20,8 +20,11 @@ OSPF6 router
 
    Set router's Router-ID.
 
-.. index:: interface IFNAME area AREA
-.. clicmd:: interface IFNAME area AREA
+.. index:: interface IFNAME area (0-4294967295)
+.. clicmd:: interface IFNAME area (0-4294967295)
+
+.. index:: interface IFNAME area A.B.C.D
+.. clicmd:: interface IFNAME area A.B.C.D
 
    Bind interface to specified area, and start sending OSPF packets. `area` can
    be specified as 0.
@@ -127,6 +130,18 @@ OSPF6 interface
 .. clicmd:: ipv6 ospf6 network (broadcast|point-to-point)
 
    Set explicitly network type for specified interface.
+
+OSPF6 route-map
+===============
+
+Usage of *ospfd6*'s route-map support.
+
+.. index:: set metric [+|-](0-4294967295)
+.. clicmd:: set metric [+|-](0-4294967295)
+
+   Set a metric for matched route when sending announcement. Use plus (+) sign
+   to add a metric value to an existing metric. Use minus (-) sign to
+   substract a metric value from an existing metric.
 
 .. _redistribute-routes-to-ospf6:
 

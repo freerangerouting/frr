@@ -58,7 +58,6 @@ static void nhrp_route_update_put(struct route_node *rn)
 	if (!ri->ifp && !ri->nhrp_ifp
 	    && sockunion_family(&ri->via) == AF_UNSPEC) {
 		XFREE(MTYPE_NHRP_ROUTE, rn->info);
-		rn->info = NULL;
 		route_unlock_node(rn);
 	}
 	route_unlock_node(rn);
@@ -100,6 +99,7 @@ void nhrp_route_announce(int add, enum nhrp_cache_type type,
 {
 	struct zapi_route api;
 	struct zapi_nexthop *api_nh;
+	union sockunion *nexthop_ref = (union sockunion *)nexthop;
 
 	if (zclient->sock < 0)
 		return;
@@ -135,8 +135,14 @@ void nhrp_route_announce(int add, enum nhrp_cache_type type,
 
 	switch (api.prefix.family) {
 	case AF_INET:
-		if (nexthop) {
-			api_nh->gate.ipv4 = nexthop->sin.sin_addr;
+		if (api.prefix.prefixlen == IPV4_MAX_BITLEN &&
+		    nexthop_ref &&
+		    memcmp(&nexthop_ref->sin.sin_addr, &api.prefix.u.prefix4,
+			   sizeof(struct in_addr)) == 0) {
+			nexthop_ref = NULL;
+		}
+		if (nexthop_ref) {
+			api_nh->gate.ipv4 = nexthop_ref->sin.sin_addr;
 			api_nh->type = NEXTHOP_TYPE_IPV4;
 		}
 		if (ifp) {
@@ -148,8 +154,14 @@ void nhrp_route_announce(int add, enum nhrp_cache_type type,
 		}
 		break;
 	case AF_INET6:
-		if (nexthop) {
-			api_nh->gate.ipv6 = nexthop->sin6.sin6_addr;
+		if (api.prefix.prefixlen == IPV6_MAX_BITLEN &&
+		    nexthop_ref &&
+		    memcmp(&nexthop_ref->sin6.sin6_addr, &api.prefix.u.prefix6,
+			   sizeof(struct in6_addr)) == 0) {
+			nexthop_ref = NULL;
+		}
+		if (nexthop_ref) {
+			api_nh->gate.ipv6 = nexthop_ref->sin6.sin6_addr;
 			api_nh->type = NEXTHOP_TYPE_IPV6;
 		}
 		if (ifp) {
@@ -171,12 +183,12 @@ void nhrp_route_announce(int add, enum nhrp_cache_type type,
 
 		prefix2str(&api.prefix, buf[0], sizeof(buf[0]));
 		zlog_debug(
-			"Zebra send: route %s %s nexthop %s metric %u"
-			" count %d dev %s",
+			"Zebra send: route %s %s nexthop %s metric %u count %d dev %s",
 			add ? "add" : "del", buf[0],
-			nexthop ? inet_ntop(api.prefix.family, &api_nh->gate,
-					    buf[1], sizeof(buf[1]))
-				: "<onlink>",
+			nexthop_ref ? inet_ntop(api.prefix.family,
+						&api_nh->gate,
+						buf[1], sizeof(buf[1]))
+			: "<onlink>",
 			api.metric, api.nexthop_num, ifp ? ifp->name : "none");
 	}
 
@@ -200,6 +212,10 @@ int nhrp_route_read(ZAPI_CALLBACK_ARGS)
 	if (CHECK_FLAG(api.message, ZAPI_MESSAGE_SRCPFX))
 		return 0;
 
+	/* ignore our routes */
+	if (api.type == ZEBRA_ROUTE_NHRP)
+		return 0;
+
 	sockunion_family(&nexthop_addr) = AF_UNSPEC;
 	if (CHECK_FLAG(api.message, ZAPI_MESSAGE_NEXTHOP)) {
 		api_nh = &api.nexthops[0];
@@ -221,8 +237,8 @@ int nhrp_route_read(ZAPI_CALLBACK_ARGS)
 	added = (cmd == ZEBRA_REDISTRIBUTE_ROUTE_ADD);
 	debugf(NHRP_DEBUG_ROUTE, "if-route-%s: %s via %s dev %s",
 	       added ? "add" : "del",
-	       prefix2str(&api.prefix, buf[0], sizeof buf[0]),
-	       sockunion2str(&nexthop_addr, buf[1], sizeof buf[1]),
+	       prefix2str(&api.prefix, buf[0], sizeof(buf[0])),
+	       sockunion2str(&nexthop_addr, buf[1], sizeof(buf[1])),
 	       ifp ? ifp->name : "(none)");
 
 	nhrp_route_update_zebra(&api.prefix, &nexthop_addr, ifp);
@@ -249,7 +265,7 @@ int nhrp_route_get_nexthop(const union sockunion *addr, struct prefix *p,
 	ri = rn->info;
 	if (ri->nhrp_ifp) {
 		debugf(NHRP_DEBUG_ROUTE, "lookup %s: nhrp_if=%s",
-		       prefix2str(&lookup, buf, sizeof buf),
+		       prefix2str(&lookup, buf, sizeof(buf)),
 		       ri->nhrp_ifp->name);
 
 		if (via)
@@ -258,7 +274,7 @@ int nhrp_route_get_nexthop(const union sockunion *addr, struct prefix *p,
 			*ifp = ri->nhrp_ifp;
 	} else {
 		debugf(NHRP_DEBUG_ROUTE, "lookup %s: zebra route dev %s",
-		       prefix2str(&lookup, buf, sizeof buf),
+		       prefix2str(&lookup, buf, sizeof(buf)),
 		       ri->ifp ? ri->ifp->name : "(none)");
 
 		if (via)
@@ -353,10 +369,22 @@ void nhrp_zebra_init(void)
 	zclient_init(zclient, ZEBRA_ROUTE_NHRP, 0, &nhrpd_privs);
 }
 
+static void nhrp_table_node_cleanup(struct route_table *table,
+				    struct route_node *node)
+{
+	if (!node->info)
+		return;
+
+	XFREE(MTYPE_NHRP_ROUTE, node->info);
+}
+
 void nhrp_zebra_terminate(void)
 {
 	zclient_stop(zclient);
 	zclient_free(zclient);
+
+	zebra_rib[AFI_IP]->cleanup = nhrp_table_node_cleanup;
+	zebra_rib[AFI_IP6]->cleanup = nhrp_table_node_cleanup;
 	route_table_finish(zebra_rib[AFI_IP]);
 	route_table_finish(zebra_rib[AFI_IP6]);
 }

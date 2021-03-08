@@ -23,17 +23,16 @@
 #include "table.h"
 #include "memory.h"
 #include "command.h"
-#include "if.h"
 #include "log.h"
 #include "sockunion.h"
 #include "linklist.h"
-#include "thread.h"
 #include "prefix.h"
 #include "nexthop.h"
 #include "mpls.h"
 #include "jhash.h"
 #include "printfrr.h"
 #include "vrf.h"
+#include "nexthop_group.h"
 
 DEFINE_MTYPE_STATIC(LIB, NEXTHOP, "Nexthop")
 DEFINE_MTYPE_STATIC(LIB, NH_LABEL, "Nexthop label")
@@ -153,8 +152,40 @@ static int _nexthop_cmp_no_labels(const struct nexthop *next1,
 		break;
 	}
 
-	ret = _nexthop_source_cmp(next1, next2);
+	if (next1->srte_color < next2->srte_color)
+		return -1;
+	if (next1->srte_color > next2->srte_color)
+		return 1;
 
+	ret = _nexthop_source_cmp(next1, next2);
+	if (ret != 0)
+		goto done;
+
+	if (!CHECK_FLAG(next1->flags, NEXTHOP_FLAG_HAS_BACKUP) &&
+	    !CHECK_FLAG(next2->flags, NEXTHOP_FLAG_HAS_BACKUP))
+		return 0;
+
+	if (!CHECK_FLAG(next1->flags, NEXTHOP_FLAG_HAS_BACKUP) &&
+	    CHECK_FLAG(next2->flags, NEXTHOP_FLAG_HAS_BACKUP))
+		return -1;
+
+	if (CHECK_FLAG(next1->flags, NEXTHOP_FLAG_HAS_BACKUP) &&
+	    !CHECK_FLAG(next2->flags, NEXTHOP_FLAG_HAS_BACKUP))
+		return 1;
+
+	if (next1->backup_num == 0 && next2->backup_num == 0)
+		goto done;
+
+	if (next1->backup_num < next2->backup_num)
+		return -1;
+
+	if (next1->backup_num > next2->backup_num)
+		return 1;
+
+	ret = memcmp(next1->backup_idx,
+		     next2->backup_idx, next1->backup_num);
+
+done:
 	return ret;
 }
 
@@ -171,35 +202,41 @@ int nexthop_cmp(const struct nexthop *next1, const struct nexthop *next2)
 	return ret;
 }
 
-int nexthop_same_firsthop(struct nexthop *next1, struct nexthop *next2)
+bool nexthop_same_firsthop(const struct nexthop *next1,
+			   const struct nexthop *next2)
 {
+	/* Map the TYPE_IPx types to TYPE_IPx_IFINDEX */
 	int type1 = NEXTHOP_FIRSTHOPTYPE(next1->type);
 	int type2 = NEXTHOP_FIRSTHOPTYPE(next2->type);
 
 	if (type1 != type2)
-		return 0;
+		return false;
+
+	if (next1->vrf_id != next2->vrf_id)
+		return false;
+
 	switch (type1) {
 	case NEXTHOP_TYPE_IPV4_IFINDEX:
 		if (!IPV4_ADDR_SAME(&next1->gate.ipv4, &next2->gate.ipv4))
-			return 0;
+			return false;
 		if (next1->ifindex != next2->ifindex)
-			return 0;
+			return false;
 		break;
 	case NEXTHOP_TYPE_IFINDEX:
 		if (next1->ifindex != next2->ifindex)
-			return 0;
+			return false;
 		break;
 	case NEXTHOP_TYPE_IPV6_IFINDEX:
 		if (!IPV6_ADDR_SAME(&next1->gate.ipv6, &next2->gate.ipv6))
-			return 0;
+			return false;
 		if (next1->ifindex != next2->ifindex)
-			return 0;
+			return false;
 		break;
 	default:
 		/* do nothing */
 		break;
 	}
-	return 1;
+	return true;
 }
 
 /*
@@ -239,7 +276,7 @@ struct nexthop *nexthop_new(void)
 	 * The linux kernel does some weird stuff with adding +1 to
 	 * all nexthop weights it gets over netlink.
 	 * To handle this, just default everything to 1 right from
-	 * from the beggining so we don't have to special case
+	 * from the beginning so we don't have to special case
 	 * default weights in the linux netlink code.
 	 *
 	 * 1 should be a valid on all platforms anyway.
@@ -392,8 +429,8 @@ struct nexthop *nexthop_from_blackhole(enum blackhole_type bh_type)
 }
 
 /* Update nexthop with label information. */
-void nexthop_add_labels(struct nexthop *nexthop, enum lsp_types_t type,
-			uint8_t num_labels, mpls_label_t *label)
+void nexthop_add_labels(struct nexthop *nexthop, enum lsp_types_t ltype,
+			uint8_t num_labels, const mpls_label_t *labels)
 {
 	struct mpls_label_stack *nh_label;
 	int i;
@@ -401,23 +438,26 @@ void nexthop_add_labels(struct nexthop *nexthop, enum lsp_types_t type,
 	if (num_labels == 0)
 		return;
 
-	nexthop->nh_label_type = type;
+	/* Enforce limit on label stack size */
+	if (num_labels > MPLS_MAX_LABELS)
+		num_labels = MPLS_MAX_LABELS;
+
+	nexthop->nh_label_type = ltype;
+
 	nh_label = XCALLOC(MTYPE_NH_LABEL,
 			   sizeof(struct mpls_label_stack)
 				   + num_labels * sizeof(mpls_label_t));
 	nh_label->num_labels = num_labels;
 	for (i = 0; i < num_labels; i++)
-		nh_label->label[i] = *(label + i);
+		nh_label->label[i] = *(labels + i);
 	nexthop->nh_label = nh_label;
 }
 
 /* Free label information of nexthop, if present. */
 void nexthop_del_labels(struct nexthop *nexthop)
 {
-	if (nexthop->nh_label) {
-		XFREE(MTYPE_NH_LABEL, nexthop->nh_label);
-		nexthop->nh_label_type = ZEBRA_LSP_NONE;
-	}
+	XFREE(MTYPE_NH_LABEL, nexthop->nh_label);
+	nexthop->nh_label_type = ZEBRA_LSP_NONE;
 }
 
 const char *nexthop2str(const struct nexthop *nexthop, char *str, int size)
@@ -490,11 +530,12 @@ struct nexthop *nexthop_next_active_resolved(const struct nexthop *nexthop)
 	return next;
 }
 
-unsigned int nexthop_level(struct nexthop *nexthop)
+unsigned int nexthop_level(const struct nexthop *nexthop)
 {
 	unsigned int rv = 0;
 
-	for (struct nexthop *par = nexthop->rparent; par; par = par->rparent)
+	for (const struct nexthop *par = nexthop->rparent;
+	     par; par = par->rparent)
 		rv++;
 
 	return rv;
@@ -504,13 +545,15 @@ unsigned int nexthop_level(struct nexthop *nexthop)
 uint32_t nexthop_hash_quick(const struct nexthop *nexthop)
 {
 	uint32_t key = 0x45afe398;
+	int i;
 
 	key = jhash_3words(nexthop->type, nexthop->vrf_id,
 			   nexthop->nh_label_type, key);
 
 	if (nexthop->nh_label) {
 		int labels = nexthop->nh_label->num_labels;
-		int i = 0;
+
+		i = 0;
 
 		while (labels >= 3) {
 			key = jhash_3words(nexthop->nh_label->label[i],
@@ -536,6 +579,31 @@ uint32_t nexthop_hash_quick(const struct nexthop *nexthop)
 	key = jhash_2words(nexthop->ifindex,
 			   CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ONLINK),
 			   key);
+
+	/* Include backup nexthops, if present */
+	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_HAS_BACKUP)) {
+		int backups = nexthop->backup_num;
+
+		i = 0;
+
+		while (backups >= 3) {
+			key = jhash_3words(nexthop->backup_idx[i],
+					   nexthop->backup_idx[i + 1],
+					   nexthop->backup_idx[i + 2], key);
+			backups -= 3;
+			i += 3;
+		}
+
+		while (backups >= 2) {
+			key = jhash_2words(nexthop->backup_idx[i],
+					   nexthop->backup_idx[i + 1], key);
+			backups -= 2;
+			i += 2;
+		}
+
+		if (backups >= 1)
+			key = jhash_1word(nexthop->backup_idx[i], key);
+	}
 
 	return key;
 }
@@ -565,14 +633,22 @@ uint32_t nexthop_hash(const struct nexthop *nexthop)
 	return key;
 }
 
-void nexthop_copy(struct nexthop *copy, const struct nexthop *nexthop,
-		  struct nexthop *rparent)
+void nexthop_copy_no_recurse(struct nexthop *copy,
+			     const struct nexthop *nexthop,
+			     struct nexthop *rparent)
 {
 	copy->vrf_id = nexthop->vrf_id;
 	copy->ifindex = nexthop->ifindex;
 	copy->type = nexthop->type;
 	copy->flags = nexthop->flags;
 	copy->weight = nexthop->weight;
+
+	assert(nexthop->backup_num < NEXTHOP_MAX_BACKUPS);
+	copy->backup_num = nexthop->backup_num;
+	if (copy->backup_num > 0)
+		memcpy(copy->backup_idx, nexthop->backup_idx, copy->backup_num);
+
+	copy->srte_color = nexthop->srte_color;
 	memcpy(&copy->gate, &nexthop->gate, sizeof(nexthop->gate));
 	memcpy(&copy->src, &nexthop->src, sizeof(nexthop->src));
 	memcpy(&copy->rmap_src, &nexthop->rmap_src, sizeof(nexthop->rmap_src));
@@ -583,6 +659,28 @@ void nexthop_copy(struct nexthop *copy, const struct nexthop *nexthop,
 				   &nexthop->nh_label->label[0]);
 }
 
+void nexthop_copy(struct nexthop *copy, const struct nexthop *nexthop,
+		  struct nexthop *rparent)
+{
+	nexthop_copy_no_recurse(copy, nexthop, rparent);
+
+	/* Bit of a special case here, we need to handle the case
+	 * of a nexthop resolving to a group. Hence, we need to
+	 * use a nexthop_group API.
+	 */
+	if (CHECK_FLAG(copy->flags, NEXTHOP_FLAG_RECURSIVE))
+		copy_nexthops(&copy->resolved, nexthop->resolved, copy);
+}
+
+struct nexthop *nexthop_dup_no_recurse(const struct nexthop *nexthop,
+				       struct nexthop *rparent)
+{
+	struct nexthop *new = nexthop_new();
+
+	nexthop_copy_no_recurse(new, nexthop, rparent);
+	return new;
+}
+
 struct nexthop *nexthop_dup(const struct nexthop *nexthop,
 			    struct nexthop *rparent)
 {
@@ -590,6 +688,67 @@ struct nexthop *nexthop_dup(const struct nexthop *nexthop,
 
 	nexthop_copy(new, nexthop, rparent);
 	return new;
+}
+
+/*
+ * Parse one or more backup index values, as comma-separated numbers,
+ * into caller's array of uint8_ts. The array must be NEXTHOP_MAX_BACKUPS
+ * in size. Mails back the number of values converted, and returns 0 on
+ * success, <0 if an error in parsing.
+ */
+int nexthop_str2backups(const char *str, int *num_backups,
+			uint8_t *backups)
+{
+	char *ostr;			  /* copy of string (start) */
+	char *lstr;			  /* working copy of string */
+	char *nump;			  /* pointer to next segment */
+	char *endp;			  /* end pointer */
+	int i, ret;
+	uint8_t tmp[NEXTHOP_MAX_BACKUPS];
+	uint32_t lval;
+
+	/* Copy incoming string; the parse is destructive */
+	lstr = ostr = XSTRDUP(MTYPE_TMP, str);
+	*num_backups = 0;
+	ret = 0;
+
+	for (i = 0; i < NEXTHOP_MAX_BACKUPS && lstr; i++) {
+		nump = strsep(&lstr, ",");
+		lval = strtoul(nump, &endp, 10);
+
+		/* Format check */
+		if (*endp != '\0') {
+			ret = -1;
+			break;
+		}
+
+		/* Empty value */
+		if (endp == nump) {
+			ret = -1;
+			break;
+		}
+
+		/* Limit to one octet */
+		if (lval > 255) {
+			ret = -1;
+			break;
+		}
+
+		tmp[i] = lval;
+	}
+
+	/* Excess values */
+	if (ret == 0 && i == NEXTHOP_MAX_BACKUPS && lstr)
+		ret = -1;
+
+	if (ret == 0) {
+		*num_backups = i;
+		memcpy(backups, tmp, i);
+	}
+
+	XFREE(MTYPE_TMP, ostr);
+
+	return ret;
 }
 
 /*

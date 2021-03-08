@@ -201,7 +201,6 @@ static int bgp_process_reads(struct thread *thread)
 
 	while (more) {
 		/* static buffer for transferring packets */
-		static unsigned char pktbuf[BGP_MAX_PACKET_SIZE];
 		/* shorter alias to peer's input buffer */
 		struct ringbuf *ibw = peer->ibuf_work;
 		/* packet size as given by header */
@@ -231,8 +230,9 @@ static int bgp_process_reads(struct thread *thread)
 		 */
 		if (ringbuf_remain(ibw) >= pktsize) {
 			struct stream *pkt = stream_new(pktsize);
-			assert(ringbuf_get(ibw, pktbuf, pktsize) == pktsize);
-			stream_put(pkt, pktbuf, pktsize);
+			assert(STREAM_WRITEABLE(pkt) == pktsize);
+			assert(ringbuf_get(ibw, pkt->data, pktsize) == pktsize);
+			stream_set_endp(pkt, pktsize);
 
 			frr_with_mutex(&peer->io_mtx) {
 				stream_fifo_push(peer->ibuf, pkt);
@@ -462,7 +462,10 @@ static uint16_t bgp_read(struct peer *peer)
 			 safe_strerror(errno));
 
 		if (peer->status == Established) {
-			if (CHECK_FLAG(peer->sflags, PEER_STATUS_NSF_MODE)) {
+			if ((CHECK_FLAG(peer->flags, PEER_FLAG_GRACEFUL_RESTART)
+			     || CHECK_FLAG(peer->flags,
+					   PEER_FLAG_GRACEFUL_RESTART_HELPER))
+			    && CHECK_FLAG(peer->sflags, PEER_STATUS_NSF_MODE)) {
 				peer->last_reset = PEER_DOWN_NSF_CLOSE_SESSION;
 				SET_FLAG(peer->sflags, PEER_STATUS_NSF_WAIT);
 			} else
@@ -478,7 +481,10 @@ static uint16_t bgp_read(struct peer *peer)
 				   peer->host, peer->fd);
 
 		if (peer->status == Established) {
-			if (CHECK_FLAG(peer->sflags, PEER_STATUS_NSF_MODE)) {
+			if ((CHECK_FLAG(peer->flags, PEER_FLAG_GRACEFUL_RESTART)
+			     || CHECK_FLAG(peer->flags,
+					   PEER_FLAG_GRACEFUL_RESTART_HELPER))
+			    && CHECK_FLAG(peer->sflags, PEER_STATUS_NSF_MODE)) {
 				peer->last_reset = PEER_DOWN_NSF_CLOSE_SESSION;
 				SET_FLAG(peer->sflags, PEER_STATUS_NSF_WAIT);
 			} else

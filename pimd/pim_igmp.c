@@ -64,9 +64,8 @@ static int igmp_sock_open(struct in_addr ifaddr, struct interface *ifp,
 		} else {
 			zlog_warn(
 				"%s %s: IGMP socket fd=%d interface %s: could not solve %s to group address: errno=%d: %s",
-				__FILE__, __PRETTY_FUNCTION__, fd,
-				inet_ntoa(ifaddr), PIM_ALL_ROUTERS, errno,
-				safe_strerror(errno));
+				__FILE__, __func__, fd, inet_ntoa(ifaddr),
+				PIM_ALL_ROUTERS, errno, safe_strerror(errno));
 		}
 	}
 
@@ -81,7 +80,7 @@ static int igmp_sock_open(struct in_addr ifaddr, struct interface *ifp,
 	} else {
 		zlog_warn(
 			"%s %s: IGMP socket fd=%d interface %s: could not solve %s to group address: errno=%d: %s",
-			__FILE__, __PRETTY_FUNCTION__, fd, inet_ntoa(ifaddr),
+			__FILE__, __func__, fd, inet_ntoa(ifaddr),
 			PIM_ALL_SYSTEMS, errno, safe_strerror(errno));
 	}
 
@@ -92,7 +91,7 @@ static int igmp_sock_open(struct in_addr ifaddr, struct interface *ifp,
 	} else {
 		zlog_warn(
 			"%s %s: IGMP socket fd=%d interface %s: could not solve %s to group address: errno=%d: %s",
-			__FILE__, __PRETTY_FUNCTION__, fd, inet_ntoa(ifaddr),
+			__FILE__, __func__, fd, inet_ntoa(ifaddr),
 			PIM_ALL_IGMP_ROUTERS, errno, safe_strerror(errno));
 	}
 
@@ -119,8 +118,8 @@ static void igmp_sock_dump(array_t *igmp_sock_array)
 		struct igmp_sock *igmp = array_get(igmp_sock_array, i);
 
 		zlog_debug("%s %s: [%d/%d] igmp_addr=%s fd=%d", __FILE__,
-			   __PRETTY_FUNCTION__, i, size,
-			   inet_ntoa(igmp->ifaddr), igmp->fd);
+			   __func__, i, size, inet_ntoa(igmp->ifaddr),
+			   igmp->fd);
 	}
 }
 #endif
@@ -139,7 +138,7 @@ struct igmp_sock *pim_igmp_sock_lookup_ifaddr(struct list *igmp_sock_list,
 		if (ifaddr.s_addr == igmp->ifaddr.s_addr)
 			return igmp;
 
-	return 0;
+	return NULL;
 }
 
 struct igmp_sock *igmp_sock_lookup_by_fd(struct list *igmp_sock_list, int fd)
@@ -151,7 +150,7 @@ struct igmp_sock *igmp_sock_lookup_by_fd(struct list *igmp_sock_list, int fd)
 		if (fd == igmp->fd)
 			return igmp;
 
-	return 0;
+	return NULL;
 }
 
 static int pim_igmp_other_querier_expire(struct thread *t)
@@ -166,8 +165,7 @@ static int pim_igmp_other_querier_expire(struct thread *t)
 		char ifaddr_str[INET_ADDRSTRLEN];
 		pim_inet4_dump("<ifaddr?>", igmp->ifaddr, ifaddr_str,
 			       sizeof(ifaddr_str));
-		zlog_debug("%s: Querier %s resuming", __PRETTY_FUNCTION__,
-			   ifaddr_str);
+		zlog_debug("%s: Querier %s resuming", __func__, ifaddr_str);
 	}
 
 	/*
@@ -312,7 +310,7 @@ static int igmp_recv_query(struct igmp_sock *igmp, int query_version,
 		return 0;
 	}
 
-	if (if_lookup_address(&from, AF_INET, ifp->vrf_id)) {
+	if (if_lookup_exact_address(&from, AF_INET, ifp->vrf_id)) {
 		if (PIM_DEBUG_IGMP_PACKETS)
 			zlog_debug("Recv IGMP query on interface: %s from ourself %s",
 				   ifp->name, from_str);
@@ -353,9 +351,7 @@ static int igmp_recv_query(struct igmp_sock *igmp, int query_version,
 	 */
 	if (query_version != pim_ifp->igmp_version) {
 		zlog_warn(
-			"Recv IGMP query v%d from %s on %s but we are using v%d, please "
-			"configure all PIM routers on this subnet to use the same "
-			"IGMP version",
+			"Recv IGMP query v%d from %s on %s but we are using v%d, please configure all PIM routers on this subnet to use the same IGMP version",
 			query_version, from_str, ifp->name,
 			pim_ifp->igmp_version);
 		return 0;
@@ -419,7 +415,7 @@ static int igmp_v1_recv_report(struct igmp_sock *igmp, struct in_addr from,
 	struct igmp_group *group;
 	struct in_addr group_addr;
 
-	on_trace(__PRETTY_FUNCTION__, igmp->interface, from);
+	on_trace(__func__, igmp->interface, from);
 
 	if (igmp->mtrace_only)
 		return 0;
@@ -435,8 +431,7 @@ static int igmp_v1_recv_report(struct igmp_sock *igmp, struct in_addr from,
 	igmp->rx_stats.report_v1++;
 
 	if (PIM_DEBUG_IGMP_TRACE) {
-		zlog_warn("%s %s: FIXME WRITEME", __FILE__,
-			  __PRETTY_FUNCTION__);
+		zlog_warn("%s %s: FIXME WRITEME", __FILE__, __func__);
 	}
 
 	memcpy(&group_addr, igmp_msg + 4, sizeof(struct in_addr));
@@ -756,6 +751,39 @@ static void igmp_group_free(struct igmp_group *group)
 	XFREE(MTYPE_PIM_IGMP_GROUP, group);
 }
 
+static void igmp_group_count_incr(struct igmp_sock *igmp)
+{
+	struct pim_interface *pim_ifp = igmp->interface->info;
+
+	if (!pim_ifp)
+		return;
+
+	++pim_ifp->pim->igmp_group_count;
+	if (pim_ifp->pim->igmp_group_count
+	    == pim_ifp->pim->igmp_watermark_limit) {
+		zlog_warn(
+			"IGMP group count reached watermark limit: %u(vrf: %s)",
+			pim_ifp->pim->igmp_group_count,
+			VRF_LOGNAME(pim_ifp->pim->vrf));
+	}
+}
+
+static void igmp_group_count_decr(struct igmp_sock *igmp)
+{
+	struct pim_interface *pim_ifp = igmp->interface->info;
+
+	if (!pim_ifp)
+		return;
+
+	if (pim_ifp->pim->igmp_group_count == 0) {
+		zlog_warn("Cannot decrement igmp group count below 0(vrf: %s)",
+			  VRF_LOGNAME(pim_ifp->pim->vrf));
+		return;
+	}
+
+	--pim_ifp->pim->igmp_group_count;
+}
+
 void igmp_group_delete(struct igmp_group *group)
 {
 	struct listnode *src_node;
@@ -781,6 +809,7 @@ void igmp_group_delete(struct igmp_group *group)
 	}
 
 	group_timer_off(group);
+	igmp_group_count_decr(group->group_igmp_sock);
 	listnode_delete(group->group_igmp_sock->igmp_group_list, group);
 	hash_release(group->group_igmp_sock->igmp_group_hash, group);
 
@@ -882,7 +911,7 @@ static struct igmp_sock *igmp_sock_new(int fd, struct in_addr ifaddr,
 	igmp->igmp_group_list = list_new();
 	igmp->igmp_group_list->del = (void (*)(void *))igmp_group_free;
 
-	snprintf(hash_name, 64, "IGMP %s hash", ifp->name);
+	snprintf(hash_name, sizeof(hash_name), "IGMP %s hash", ifp->name);
 	igmp->igmp_group_hash = hash_create(igmp_group_hash_key,
 					    igmp_group_hash_equal, hash_name);
 
@@ -966,6 +995,7 @@ struct igmp_sock *pim_igmp_sock_add(struct list *igmp_sock_list,
 {
 	struct pim_interface *pim_ifp;
 	struct igmp_sock *igmp;
+	struct sockaddr_in sin;
 	int fd;
 
 	pim_ifp = ifp->info;
@@ -974,7 +1004,18 @@ struct igmp_sock *pim_igmp_sock_add(struct list *igmp_sock_list,
 	if (fd < 0) {
 		zlog_warn("Could not open IGMP socket for %s on %s",
 			  inet_ntoa(ifaddr), ifp->name);
-		return 0;
+		return NULL;
+	}
+
+	sin.sin_family = AF_INET;
+	sin.sin_addr = ifaddr;
+	sin.sin_port = 0;
+	if (bind(fd, (struct sockaddr *) &sin, sizeof(sin)) != 0) {
+		zlog_warn("Could not bind IGMP socket for %s on %s",
+			  inet_ntoa(ifaddr), ifp->name);
+		close(fd);
+
+		return NULL;
 	}
 
 	igmp = igmp_sock_new(fd, ifaddr, ifp, mtrace_only);
@@ -1014,9 +1055,8 @@ static int igmp_group_timer(struct thread *t)
 		char group_str[INET_ADDRSTRLEN];
 		pim_inet4_dump("<group?>", group->group_addr, group_str,
 			       sizeof(group_str));
-		zlog_debug("%s: Timer for group %s on interface %s",
-			   __PRETTY_FUNCTION__, group_str,
-			   group->group_igmp_sock->interface->name);
+		zlog_debug("%s: Timer for group %s on interface %s", __func__,
+			   group_str, group->group_igmp_sock->interface->name);
 	}
 
 	zassert(group->group_filtermode_isexcl);
@@ -1108,7 +1148,7 @@ struct igmp_group *igmp_add_group_by_addr(struct igmp_sock *igmp,
 
 	if (!pim_is_group_224_4(group_addr)) {
 		zlog_warn("%s: Group Specified is not part of 224.0.0.0/4",
-			  __PRETTY_FUNCTION__);
+			  __func__);
 		return NULL;
 	}
 
@@ -1116,7 +1156,7 @@ struct igmp_group *igmp_add_group_by_addr(struct igmp_sock *igmp,
 		if (PIM_DEBUG_IGMP_TRACE)
 			zlog_debug(
 				"%s: Group specified %s is part of 224.0.0.0/24",
-				__PRETTY_FUNCTION__, inet_ntoa(group_addr));
+				__func__, inet_ntoa(group_addr));
 		return NULL;
 	}
 	/*
@@ -1161,6 +1201,8 @@ struct igmp_group *igmp_add_group_by_addr(struct igmp_sock *igmp,
 			"Creating new IGMP group %s on socket %d interface %s",
 			group_str, igmp->fd, igmp->interface->name);
 	}
+
+	igmp_group_count_incr(igmp);
 
 	/*
 	  RFC 3376: 6.2.2. Definition of Group Timers

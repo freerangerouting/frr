@@ -27,6 +27,7 @@
 #include "nexthop_group.h"
 #include "nexthop_group_private.h"
 #include "log.h"
+#include "json.h"
 #include "debug.h"
 #include "pbr.h"
 
@@ -88,8 +89,7 @@ DEFUN_NOSH(no_pbr_map, no_pbr_map_cmd, "no pbr-map PBRMAP [seq (1-700)]",
 
 DEFPY(pbr_set_table_range,
       pbr_set_table_range_cmd,
-      "[no] pbr table range (10000-4294966272)$lb (10000-4294966272)$ub",
-      NO_STR
+      "pbr table range (10000-4294966272)$lb (10000-4294966272)$ub",
       PBR_STR
       "Set table ID range\n"
       "Set table ID range\n"
@@ -113,6 +113,19 @@ DEFPY(pbr_set_table_range,
 	return ret;
 }
 
+DEFPY(no_pbr_set_table_range, no_pbr_set_table_range_cmd,
+      "no pbr table range [(10000-4294966272)$lb (10000-4294966272)$ub]",
+      NO_STR
+      PBR_STR
+      "Set table ID range\n"
+      "Set table ID range\n"
+      "Lower bound for table ID range\n"
+      "Upper bound for table ID range\n")
+{
+	pbr_nht_set_tableid_range(PBR_NHT_DEFAULT_LOW_TABLEID,
+				  PBR_NHT_DEFAULT_HIGH_TABLEID);
+	return CMD_SUCCESS;
+}
 
 DEFPY(pbr_map_match_src, pbr_map_match_src_cmd,
 	"[no] match src-ip <A.B.C.D/M|X:X::X:X/M>$prefix",
@@ -130,18 +143,14 @@ DEFPY(pbr_map_match_src, pbr_map_match_src_cmd,
 		if (pbrms->src) {
 			if (prefix_same(pbrms->src, prefix))
 				return CMD_SUCCESS;
+		} else
+			pbrms->src = prefix_new();
 
-			vty_out(vty,
-				"A `match src-ip XX` command already exists, please remove that first\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-
-		pbrms->src = prefix_new();
 		prefix_copy(pbrms->src, prefix);
 	} else
 		prefix_free(&pbrms->src);
 
-	pbr_map_check(pbrms);
+	pbr_map_check(pbrms, true);
 
 	return CMD_SUCCESS;
 }
@@ -162,18 +171,99 @@ DEFPY(pbr_map_match_dst, pbr_map_match_dst_cmd,
 		if (pbrms->dst) {
 			if (prefix_same(pbrms->dst, prefix))
 				return CMD_SUCCESS;
+		} else
+			pbrms->dst = prefix_new();
 
-			vty_out(vty,
-				"A `match dst-ip XX` command already exists, please remove that first\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-
-		pbrms->dst = prefix_new();
 		prefix_copy(pbrms->dst, prefix);
 	} else
 		prefix_free(&pbrms->dst);
 
-	pbr_map_check(pbrms);
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(pbr_map_match_dscp, pbr_map_match_dscp_cmd,
+      "[no] match dscp DSCP$dscp",
+      NO_STR
+      "Match the rest of the command\n"
+      "Match based on IP DSCP field\n"
+      "DSCP value (below 64) or standard codepoint name\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+	char dscpname[100];
+	uint8_t rawDscp;
+
+	/* Discriminate dscp enums (cs0, cs1 etc.) and numbers */
+	bool isANumber = true;
+	for (int i = 0; i < (int)strlen(dscp); i++) {
+		/* Letters are not numbers */
+		if (!isdigit(dscp[i]))
+			isANumber = false;
+
+		/* Lowercase the dscp enum (if needed) */
+		if (isupper(dscp[i]))
+			dscpname[i] = tolower(dscp[i]);
+		else
+			dscpname[i] = dscp[i];
+	}
+	dscpname[strlen(dscp)] = '\0';
+
+	if (isANumber) {
+		/* dscp passed is a regular number */
+		long dscpAsNum = strtol(dscp, NULL, 0);
+
+		if (dscpAsNum > PBR_DSFIELD_DSCP >> 2) {
+			/* Refuse to install on overflow */
+			vty_out(vty, "dscp (%s) must be less than 64\n", dscp);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		rawDscp = dscpAsNum;
+	} else {
+		/* check dscp if it is an enum like cs0 */
+		rawDscp = pbr_map_decode_dscp_enum(dscpname);
+		if (rawDscp > PBR_DSFIELD_DSCP) {
+			vty_out(vty, "Invalid dscp value: %s\n", dscpname);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+	}
+
+	if (!no) {
+		if (((pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2) == rawDscp)
+			return CMD_SUCCESS;
+
+		/* Set the DSCP bits of the DSField */
+		pbrms->dsfield =
+			(pbrms->dsfield & ~PBR_DSFIELD_DSCP) | (rawDscp << 2);
+	} else {
+		pbrms->dsfield &= ~PBR_DSFIELD_DSCP;
+	}
+
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(pbr_map_match_ecn, pbr_map_match_ecn_cmd,
+      "[no] match ecn (0-3)$ecn",
+      NO_STR
+      "Match the rest of the command\n"
+      "Match based on IP ECN field\n"
+      "Explicit Congestion Notification\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+
+	if (!no) {
+		if ((pbrms->dsfield & PBR_DSFIELD_ECN) == ecn)
+			return CMD_SUCCESS;
+
+		/* Set the ECN bits of the DSField */
+		pbrms->dsfield = (pbrms->dsfield & ~PBR_DSFIELD_ECN) | ecn;
+	} else {
+		pbrms->dsfield &= ~PBR_DSFIELD_ECN;
+	}
+
+	pbr_map_check(pbrms, true);
 
 	return CMD_SUCCESS;
 }
@@ -193,47 +283,58 @@ DEFPY(pbr_map_match_mark, pbr_map_match_mark_cmd,
 #endif
 
 	if (!no) {
-		if (pbrms->mark) {
+		if (pbrms->mark)
 			if (pbrms->mark == (uint32_t)mark)
 				return CMD_SUCCESS;
-
-			vty_out(vty,
-				"A `match mark XX` command already exists, please remove that first\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
 
 		pbrms->mark = (uint32_t)mark;
 	} else
 		pbrms->mark = 0;
 
-	pbr_map_check(pbrms);
+	pbr_map_check(pbrms, true);
 
 	return CMD_SUCCESS;
 }
 
-#define SET_VRF_EXISTS_STR                                                     \
-	"A `set vrf XX` command already exists, please remove that first\n"
+static void pbrms_clear_set_vrf_config(struct pbr_map_sequence *pbrms)
+{
+	if (pbrms->vrf_lookup || pbrms->vrf_unchanged) {
+		pbr_map_delete_vrf(pbrms);
+		pbrms->vrf_name[0] = '\0';
+		pbrms->vrf_lookup = false;
+		pbrms->vrf_unchanged = false;
+	}
+}
+
+static void pbrms_clear_set_nhg_config(struct pbr_map_sequence *pbrms)
+{
+	if (pbrms->nhgrp_name)
+		pbr_map_delete_nexthops(pbrms);
+}
+
+static void pbrms_clear_set_nexthop_config(struct pbr_map_sequence *pbrms)
+{
+	if (pbrms->nhg)
+		pbr_nht_delete_individual_nexthop(pbrms);
+}
+
+static void pbrms_clear_set_config(struct pbr_map_sequence *pbrms)
+{
+	pbrms_clear_set_vrf_config(pbrms);
+	pbrms_clear_set_nhg_config(pbrms);
+	pbrms_clear_set_nexthop_config(pbrms);
+
+	pbrms->nhs_installed = false;
+}
 
 DEFPY(pbr_map_nexthop_group, pbr_map_nexthop_group_cmd,
-      "[no] set nexthop-group NHGNAME$name",
-      NO_STR
+      "set nexthop-group NHGNAME$name",
       "Set for the PBR-MAP\n"
       "nexthop-group to use\n"
       "The name of the nexthop-group\n")
 {
 	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
 	struct nexthop_group_cmd *nhgc;
-
-	if (pbrms->nhg) {
-		vty_out(vty,
-			"A `set nexthop XX` command already exists, please remove that first\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
-
-	if (pbrms->vrf_lookup || pbrms->vrf_unchanged) {
-		vty_out(vty, SET_VRF_EXISTS_STR);
-		return CMD_WARNING_CONFIG_FAILED;
-	}
 
 	nhgc = nhgc_find(name);
 	if (!nhgc) {
@@ -243,40 +344,39 @@ DEFPY(pbr_map_nexthop_group, pbr_map_nexthop_group_cmd,
 			"PBR-MAP will not be applied until it is created\n");
 	}
 
-	if (no) {
-		if (pbrms->nhgrp_name && strcmp(name, pbrms->nhgrp_name) == 0)
-			pbr_map_delete_nexthops(pbrms);
-		else {
-			vty_out(vty,
-				"Nexthop Group specified: %s does not exist to remove\n",
-				name);
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-	} else {
-		if (pbrms->nhgrp_name) {
-			if (strcmp(name, pbrms->nhgrp_name) != 0) {
-				vty_out(vty,
-					"Please delete current nexthop group before modifying current one\n");
-				return CMD_WARNING_CONFIG_FAILED;
-			}
+	if (pbrms->nhgrp_name && strcmp(name, pbrms->nhgrp_name) == 0)
+		return CMD_SUCCESS;
 
-			return CMD_SUCCESS;
-		}
-		pbrms->nhgrp_name = XSTRDUP(MTYPE_TMP, name);
-		pbr_map_check(pbrms);
-	}
+	/* This is new/replacement config */
+	pbrms_clear_set_config(pbrms);
+
+	pbrms->nhgrp_name = XSTRDUP(MTYPE_TMP, name);
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_pbr_map_nexthop_group, no_pbr_map_nexthop_group_cmd,
+      "no set nexthop-group [NHGNAME$name]",
+      NO_STR
+      "Set for the PBR-MAP\n"
+      "nexthop-group to use\n"
+      "The name of the nexthop-group\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+
+	pbrms_clear_set_config(pbrms);
 
 	return CMD_SUCCESS;
 }
 
 DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
-      "[no] set nexthop\
+      "set nexthop\
         <\
 	  <A.B.C.D|X:X::X:X>$addr [INTERFACE$intf]\
 	  |INTERFACE$intf\
 	>\
         [nexthop-vrf NAME$vrf_name]",
-      NO_STR
       "Set for the PBR-MAP\n"
       "Specify one of the nexthops in this map\n"
       "v4 Address\n"
@@ -289,18 +389,7 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
 	struct vrf *vrf;
 	struct nexthop nhop;
-	struct nexthop *nh;
-
-	if (pbrms->nhgrp_name) {
-		vty_out(vty,
-			"Please unconfigure the nexthop group before adding an individual nexthop\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
-
-	if (pbrms->vrf_lookup || pbrms->vrf_unchanged) {
-		vty_out(vty, SET_VRF_EXISTS_STR);
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	struct nexthop *nh = NULL;
 
 	if (vrf_name)
 		vrf = vrf_lookup_by_name(vrf_name);
@@ -308,7 +397,7 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 		vrf = vrf_lookup_by_id(VRF_DEFAULT);
 
 	if (!vrf) {
-		vty_out(vty, "Specified: %s is non-existent\n", vrf_name);
+		vty_out(vty, "Specified VRF: %s is non-existent\n", vrf_name);
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
@@ -316,13 +405,24 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 	nhop.vrf_id = vrf->vrf_id;
 
 	if (intf) {
-		nhop.ifindex = ifname2ifindex(intf, vrf->vrf_id);
-		if (nhop.ifindex == IFINDEX_INTERNAL) {
-			vty_out(vty,
-				"Specified Intf %s does not exist in vrf: %s\n",
-				intf, vrf->name);
+		struct interface *ifp;
+
+		ifp = if_lookup_by_name_all_vrf(intf);
+		if (!ifp) {
+			vty_out(vty, "Specified Intf %s does not exist\n",
+				intf);
 			return CMD_WARNING_CONFIG_FAILED;
 		}
+		if (ifp->vrf_id != vrf->vrf_id) {
+			struct vrf *actual;
+
+			actual = vrf_lookup_by_id(ifp->vrf_id);
+			vty_out(vty,
+				"Specified Intf %s is not in vrf %s but is in vrf %s, using actual vrf\n",
+				ifp->name, vrf->name, actual->name);
+		}
+		nhop.ifindex = ifp->ifindex;
+		nhop.vrf_id = ifp->vrf_id;
 	}
 
 	if (addr) {
@@ -350,45 +450,18 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 
 	if (pbrms->nhg)
 		nh = nexthop_exists(pbrms->nhg, &nhop);
-	else {
-		char buf[PBR_NHC_NAMELEN];
 
-		if (no) {
-			vty_out(vty, "No nexthops to delete\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
+	if (nh) /* Same config re-entered */
+		goto done;
 
-		pbrms->nhg = nexthop_group_new();
-		pbrms->internal_nhg_name =
-			XSTRDUP(MTYPE_TMP,
-				pbr_nht_nexthop_make_name(pbrms->parent->name,
-							  PBR_NHC_NAMELEN,
-							  pbrms->seqno,
-							  buf));
-		nh = NULL;
-	}
+	/* This is new/replacement config */
+	pbrms_clear_set_config(pbrms);
 
-	if (no) {
-		if (nh)
-			pbr_nht_delete_individual_nexthop(pbrms);
-	} else if (!nh) {
+	pbr_nht_add_individual_nexthop(pbrms, &nhop);
 
-		if (pbrms->nhg->nexthop) {
-			vty_out(vty,
-				"If you would like more than one nexthop please use nexthop-groups\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
+	pbr_map_check(pbrms, true);
 
-		/* must be adding new nexthop since !no and !nexthop_exists */
-		nh = nexthop_new();
-
-		memcpy(nh, &nhop, sizeof(nhop));
-		_nexthop_add(&pbrms->nhg->nexthop, nh);
-
-		pbr_nht_add_individual_nexthop(pbrms);
-		pbr_map_check(pbrms);
-	}
-
+done:
 	if (nhop.type == NEXTHOP_TYPE_IFINDEX
 	    || (nhop.type == NEXTHOP_TYPE_IPV6_IFINDEX
 		&& IN6_IS_ADDR_LINKLOCAL(&nhop.gate.ipv6))) {
@@ -402,8 +475,69 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 	return CMD_SUCCESS;
 }
 
+DEFPY(no_pbr_map_nexthop, no_pbr_map_nexthop_cmd,
+      "no set nexthop\
+        [<\
+	  <A.B.C.D|X:X::X:X>$addr [INTERFACE$intf]\
+	  |INTERFACE$intf\
+	>\
+        [nexthop-vrf NAME$vrf_name]]",
+      NO_STR
+      "Set for the PBR-MAP\n"
+      "Specify one of the nexthops in this map\n"
+      "v4 Address\n"
+      "v6 Address\n"
+      "Interface to use\n"
+      "Interface to use\n"
+      "If the nexthop is in a different vrf tell us\n"
+      "The nexthop-vrf Name\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+
+	pbrms_clear_set_config(pbrms);
+
+	return CMD_SUCCESS;
+}
+
 DEFPY(pbr_map_vrf, pbr_map_vrf_cmd,
-      "[no] set vrf <NAME$vrf_name|unchanged>",
+      "set vrf <NAME$vrf_name|unchanged>",
+      "Set for the PBR-MAP\n"
+      "Specify the VRF for this map\n"
+      "The VRF Name\n"
+      "Use the interface's VRF for lookup\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+
+	/*
+	 * If an equivalent set vrf * exists, just return success.
+	 */
+	if (vrf_name && pbrms->vrf_lookup
+	    && strncmp(pbrms->vrf_name, vrf_name, sizeof(pbrms->vrf_name)) == 0)
+		return CMD_SUCCESS;
+	else if (!vrf_name && pbrms->vrf_unchanged) /* Unchanged already set */
+		return CMD_SUCCESS;
+
+	if (vrf_name && !pbr_vrf_lookup_by_name(vrf_name)) {
+		vty_out(vty, "Specified: %s is non-existent\n", vrf_name);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	/* This is new/replacement config */
+	pbrms_clear_set_config(pbrms);
+
+	if (vrf_name) {
+		pbrms->vrf_lookup = true;
+		strlcpy(pbrms->vrf_name, vrf_name, sizeof(pbrms->vrf_name));
+	} else
+		pbrms->vrf_unchanged = true;
+
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_pbr_map_vrf, no_pbr_map_vrf_cmd,
+      "no set vrf [<NAME$vrf_name|unchanged>]",
       NO_STR
       "Set for the PBR-MAP\n"
       "Specify the VRF for this map\n"
@@ -411,50 +545,10 @@ DEFPY(pbr_map_vrf, pbr_map_vrf_cmd,
       "Use the interface's VRF for lookup\n")
 {
 	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
-	int ret = CMD_SUCCESS;
 
-	if (no) {
-		pbr_map_delete_vrf(pbrms);
+	pbrms_clear_set_config(pbrms);
 
-		/* Reset all data */
-		pbrms->nhs_installed = false;
-		pbrms->vrf_name[0] = '\0';
-		pbrms->vrf_lookup = false;
-		pbrms->vrf_unchanged = false;
-
-		goto done;
-	}
-
-	if (pbrms->nhgrp_name || pbrms->nhg) {
-		vty_out(vty,
-			"A `set nexthop/nexthop-group XX` command already exits, please remove that first\n");
-		ret = CMD_WARNING_CONFIG_FAILED;
-		goto done;
-	}
-
-	if (pbrms->vrf_lookup || pbrms->vrf_unchanged) {
-		vty_out(vty, SET_VRF_EXISTS_STR);
-		ret = CMD_WARNING_CONFIG_FAILED;
-		goto done;
-	}
-
-	if (vrf_name) {
-		if (!pbr_vrf_lookup_by_name(vrf_name)) {
-			vty_out(vty, "Specified: %s is non-existent\n",
-				vrf_name);
-			ret = CMD_WARNING_CONFIG_FAILED;
-			goto done;
-		}
-
-		pbrms->vrf_lookup = true;
-		strlcpy(pbrms->vrf_name, vrf_name, sizeof(pbrms->vrf_name));
-	} else
-		pbrms->vrf_unchanged = true;
-
-	pbr_map_check(pbrms);
-
-done:
-	return ret;
+	return CMD_SUCCESS;
 }
 
 DEFPY (pbr_policy,
@@ -524,6 +618,33 @@ DEFPY (show_pbr,
 	return CMD_SUCCESS;
 }
 
+static void
+pbrms_nexthop_group_write_individual_nexthop(
+	struct vty *vty, const struct pbr_map_sequence *pbrms)
+{
+	struct pbr_nexthop_group_cache find;
+	struct pbr_nexthop_group_cache *pnhgc;
+	struct pbr_nexthop_cache lookup;
+	struct pbr_nexthop_cache *pnhc;
+
+	memset(&find, 0, sizeof(find));
+	strlcpy(find.name, pbrms->internal_nhg_name, sizeof(find.name));
+
+	pnhgc = hash_lookup(pbr_nhg_hash, &find);
+	assert(pnhgc);
+
+	lookup.nexthop = *pbrms->nhg->nexthop;
+	pnhc = hash_lookup(pnhgc->nhh, &lookup);
+
+	nexthop_group_write_nexthop_simple(
+		vty, pbrms->nhg->nexthop,
+		pnhc->nexthop.ifindex != 0 ? pnhc->intf_name : NULL);
+	if (pnhc->nexthop.vrf_id != VRF_DEFAULT)
+		vty_out(vty, " nexthop-vrf %s", pnhc->vrf_name);
+
+	vty_out(vty, "\n");
+}
+
 static void vty_show_pbrms(struct vty *vty,
 			   const struct pbr_map_sequence *pbrms, bool detail)
 {
@@ -550,6 +671,12 @@ static void vty_show_pbrms(struct vty *vty,
 	if (pbrms->dst)
 		vty_out(vty, "        DST Match: %s\n",
 			prefix2str(pbrms->dst, buf, sizeof(buf)));
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		vty_out(vty, "        DSCP Match: %u\n",
+			(pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		vty_out(vty, "        ECN Match: %u\n",
+			pbrms->dsfield & PBR_DSFIELD_ECN);
 	if (pbrms->mark)
 		vty_out(vty, "        MARK Match: %u\n", pbrms->mark);
 
@@ -570,7 +697,7 @@ static void vty_show_pbrms(struct vty *vty,
 
 	} else if (pbrms->nhg) {
 		vty_out(vty, "        ");
-		nexthop_group_write_nexthop(vty, pbrms->nhg->nexthop);
+		pbrms_nexthop_group_write_individual_nexthop(vty, pbrms);
 		if (detail)
 			vty_out(vty,
 				"          Installed: %u(%d) Tableid: %d\n",
@@ -593,6 +720,67 @@ static void vty_show_pbrms(struct vty *vty,
 	}
 }
 
+static void vty_json_pbrms(json_object *j, struct vty *vty,
+			   const struct pbr_map_sequence *pbrms)
+{
+	json_object *jpbrm, *nexthop_group;
+	char *nhg_name = pbrms->nhgrp_name ? pbrms->nhgrp_name
+					   : pbrms->internal_nhg_name;
+	char buf[PREFIX_STRLEN];
+	char rbuf[64];
+
+	jpbrm = json_object_new_object();
+
+	json_object_int_add(jpbrm, "id", pbrms->unique);
+
+	if (pbrms->reason)
+		pbr_map_reason_string(pbrms->reason, rbuf, sizeof(rbuf));
+
+	json_object_int_add(jpbrm, "sequenceNumber", pbrms->seqno);
+	json_object_int_add(jpbrm, "ruleNumber", pbrms->ruleno);
+	json_object_boolean_add(jpbrm, "vrfUnchanged", pbrms->vrf_unchanged);
+	json_object_boolean_add(jpbrm, "installed",
+				pbr_nht_get_installed(nhg_name));
+	json_object_string_add(jpbrm, "installedReason",
+			       pbrms->reason ? rbuf : "Valid");
+
+	if (nhg_name) {
+		nexthop_group = json_object_new_object();
+
+		json_object_int_add(nexthop_group, "tableId",
+				    pbr_nht_get_table(nhg_name));
+		json_object_string_add(nexthop_group, "name", nhg_name);
+		json_object_boolean_add(nexthop_group, "installed",
+					pbr_nht_get_installed(nhg_name));
+		json_object_int_add(nexthop_group, "installedInternally",
+				    pbrms->nhs_installed);
+
+		json_object_object_add(jpbrm, "nexthopGroup", nexthop_group);
+	}
+
+	if (pbrms->vrf_lookup)
+		json_object_string_add(jpbrm, "vrfName", pbrms->vrf_name);
+
+	if (pbrms->src)
+		json_object_string_add(
+			jpbrm, "matchSrc",
+			prefix2str(pbrms->src, buf, sizeof(buf)));
+	if (pbrms->dst)
+		json_object_string_add(
+			jpbrm, "matchDst",
+			prefix2str(pbrms->dst, buf, sizeof(buf)));
+	if (pbrms->mark)
+		json_object_int_add(jpbrm, "matchMark", pbrms->mark);
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		json_object_int_add(jpbrm, "matchDscp",
+				    (pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		json_object_int_add(jpbrm, "matchEcn",
+				    pbrms->dsfield & PBR_DSFIELD_ECN);
+
+	json_object_array_add(j, jpbrm);
+}
+
 static void vty_show_pbr_map(struct vty *vty, const struct pbr_map *pbrm,
 			     bool detail)
 {
@@ -606,67 +794,155 @@ static void vty_show_pbr_map(struct vty *vty, const struct pbr_map *pbrm,
 		vty_show_pbrms(vty, pbrms, detail);
 }
 
+static void vty_json_pbr_map(json_object *j, struct vty *vty,
+			     const struct pbr_map *pbrm)
+{
+	struct pbr_map_sequence *pbrms;
+	struct listnode *node;
+	json_object *jpbrms;
+
+	json_object_string_add(j, "name", pbrm->name);
+	json_object_boolean_add(j, "valid", pbrm->valid);
+
+	jpbrms = json_object_new_array();
+
+	for (ALL_LIST_ELEMENTS_RO(pbrm->seqnumbers, node, pbrms))
+		vty_json_pbrms(jpbrms, vty, pbrms);
+
+	json_object_object_add(j, "policies", jpbrms);
+}
+
 DEFPY (show_pbr_map,
 	show_pbr_map_cmd,
-	"show pbr map [NAME$name] [detail$detail]",
+	"show pbr map [NAME$name] [detail$detail|json$json]",
 	SHOW_STR
 	PBR_STR
 	"PBR Map\n"
 	"PBR Map Name\n"
-	"Detailed information\n")
+	"Detailed information\n"
+	JSON_STR)
 {
 	struct pbr_map *pbrm;
+	json_object *j = NULL;
+
+	if (json)
+		j = json_object_new_array();
 
 	RB_FOREACH (pbrm, pbr_map_entry_head, &pbr_maps) {
+		json_object *this_map = NULL;
 		if (name && strcmp(name, pbrm->name) != 0)
 			continue;
 
+		if (j)
+			this_map = json_object_new_object();
+
+		if (this_map) {
+			vty_json_pbr_map(this_map, vty, pbrm);
+
+			json_object_array_add(j, this_map);
+			continue;
+		}
+
 		vty_show_pbr_map(vty, pbrm, detail);
 	}
+
+	if (j) {
+		vty_out(vty, "%s\n",
+			json_object_to_json_string_ext(
+				j, JSON_C_TO_STRING_PRETTY));
+		json_object_free(j);
+	}
+
 	return CMD_SUCCESS;
 }
 
 DEFPY(show_pbr_nexthop_group,
       show_pbr_nexthop_group_cmd,
-      "show pbr nexthop-groups [WORD$word]",
+      "show pbr nexthop-groups [WORD$word] [json$json]",
       SHOW_STR
       PBR_STR
       "Nexthop Groups\n"
-      "Optional Name of the nexthop group\n")
+      "Optional Name of the nexthop group\n"
+      JSON_STR)
 {
-	pbr_nht_show_nexthop_group(vty, word);
+	json_object *j = NULL;
+
+	if (json)
+		j = json_object_new_array();
+
+	if (j) {
+		pbr_nht_json_nexthop_group(j, word);
+
+		vty_out(vty, "%s\n",
+			json_object_to_json_string_ext(
+				j, JSON_C_TO_STRING_PRETTY));
+
+		json_object_free(j);
+	} else
+		pbr_nht_show_nexthop_group(vty, word);
+
 
 	return CMD_SUCCESS;
 }
 
 DEFPY (show_pbr_interface,
 	show_pbr_interface_cmd,
-	"show pbr interface [NAME$name]",
+	"show pbr interface [NAME$name] [json$json]",
 	SHOW_STR
 	PBR_STR
 	"PBR Interface\n"
-	"PBR Interface Name\n")
+	"PBR Interface Name\n"
+	JSON_STR)
 {
 	struct interface *ifp;
 	struct vrf *vrf;
 	struct pbr_interface *pbr_ifp;
+	json_object *j = NULL;
+
+	if (json)
+		j = json_object_new_array();
 
 	RB_FOREACH(vrf, vrf_name_head, &vrfs_by_name) {
 		FOR_ALL_INTERFACES(vrf, ifp) {
 			struct pbr_map *pbrm;
+			json_object *this_iface = NULL;
 
-			if (!ifp->info)
-				continue;
+			if (j)
+				this_iface = json_object_new_object();
 
-			if (name && strcmp(ifp->name, name) != 0)
+			if (!ifp->info) {
+				json_object_free(this_iface);
 				continue;
+			}
+
+			if (name && strcmp(ifp->name, name) != 0) {
+				json_object_free(this_iface);
+				continue;
+			}
 
 			pbr_ifp = ifp->info;
 
-			if (strcmp(pbr_ifp->mapname, "") == 0)
+			if (strcmp(pbr_ifp->mapname, "") == 0) {
+				json_object_free(this_iface);
 				continue;
+			}
 
 			pbrm = pbrm_find(pbr_ifp->mapname);
+
+			if (this_iface) {
+				json_object_string_add(this_iface, "name",
+						       ifp->name);
+				json_object_int_add(this_iface, "index",
+						    ifp->ifindex);
+				json_object_string_add(this_iface, "policy",
+						       pbr_ifp->mapname);
+				json_object_boolean_add(this_iface, "valid",
+							pbrm);
+
+				json_object_array_add(j, this_iface);
+				continue;
+			}
+
 			vty_out(vty, "  %s(%d) with pbr-policy %s", ifp->name,
 				ifp->ifindex, pbr_ifp->mapname);
 			if (!pbrm)
@@ -675,12 +951,24 @@ DEFPY (show_pbr_interface,
 		}
 	}
 
+	if (j) {
+		vty_out(vty, "%s\n",
+			json_object_to_json_string_ext(
+				j, JSON_C_TO_STRING_PRETTY));
+		json_object_free(j);
+	}
+
 	return CMD_SUCCESS;
 }
 
 /* PBR debugging CLI ------------------------------------------------------- */
 
-static struct cmd_node debug_node = {DEBUG_NODE, "", 1};
+static struct cmd_node debug_node = {
+	.name = "debug",
+	.node = DEBUG_NODE,
+	.prompt = "",
+	.config_write = pbr_debug_config_write,
+};
 
 DEFPY(debug_pbr,
       debug_pbr_cmd,
@@ -728,8 +1016,13 @@ DEFUN_NOSH(show_debugging_pbr,
 /* ------------------------------------------------------------------------- */
 
 
+static int pbr_interface_config_write(struct vty *vty);
 static struct cmd_node interface_node = {
-	INTERFACE_NODE, "%s(config-if)# ", 1 /* vtysh ? yes */
+	.name = "interface",
+	.node = INTERFACE_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-if)# ",
+	.config_write = pbr_interface_config_write,
 };
 
 static int pbr_interface_config_write(struct vty *vty)
@@ -757,8 +1050,15 @@ static int pbr_interface_config_write(struct vty *vty)
 	return 1;
 }
 
+static int pbr_vty_map_config_write(struct vty *vty);
 /* PBR map node structure. */
-static struct cmd_node pbr_map_node = {PBRMAP_NODE, "%s(config-pbr-map)# ", 1};
+static struct cmd_node pbr_map_node = {
+	.name = "pbr-map",
+	.node = PBRMAP_NODE,
+	.parent_node = CONFIG_NODE,
+	.prompt = "%s(config-pbr-map)# ",
+	.config_write = pbr_vty_map_config_write,
+};
 
 static int pbr_vty_map_config_write_sequence(struct vty *vty,
 					     struct pbr_map *pbrm,
@@ -776,6 +1076,14 @@ static int pbr_vty_map_config_write_sequence(struct vty *vty,
 		vty_out(vty, " match dst-ip %s\n",
 			prefix2str(pbrms->dst, buff, sizeof(buff)));
 
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		vty_out(vty, " match dscp %u\n",
+			(pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		vty_out(vty, " match ecn %u\n",
+			pbrms->dsfield & PBR_DSFIELD_ECN);
+
 	if (pbrms->mark)
 		vty_out(vty, " match mark %u\n", pbrms->mark);
 
@@ -790,7 +1098,7 @@ static int pbr_vty_map_config_write_sequence(struct vty *vty,
 
 	if (pbrms->nhg) {
 		vty_out(vty, " set ");
-		nexthop_group_write_nexthop(vty, pbrms->nhg->nexthop);
+		pbrms_nexthop_group_write_individual_nexthop(vty, pbrms);
 	}
 
 	vty_out(vty, "!\n");
@@ -836,31 +1144,35 @@ void pbr_vty_init(void)
 {
 	cmd_variable_handler_register(pbr_map_name);
 
-	install_node(&interface_node,
-		     pbr_interface_config_write);
+	install_node(&interface_node);
 	if_cmd_init();
 
-	install_node(&pbr_map_node,
-		     pbr_vty_map_config_write);
+	install_node(&pbr_map_node);
 
 	/* debug */
-	install_node(&debug_node, pbr_debug_config_write);
-	install_element(VIEW_NODE, &debug_pbr_cmd);
+	install_node(&debug_node);
+	install_element(ENABLE_NODE, &debug_pbr_cmd);
 	install_element(CONFIG_NODE, &debug_pbr_cmd);
-	install_element(VIEW_NODE, &show_debugging_pbr_cmd);
+	install_element(ENABLE_NODE, &show_debugging_pbr_cmd);
 
 	install_default(PBRMAP_NODE);
 
 	install_element(CONFIG_NODE, &pbr_map_cmd);
 	install_element(CONFIG_NODE, &no_pbr_map_cmd);
 	install_element(CONFIG_NODE, &pbr_set_table_range_cmd);
+	install_element(CONFIG_NODE, &no_pbr_set_table_range_cmd);
 	install_element(INTERFACE_NODE, &pbr_policy_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_src_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_dst_cmd);
+	install_element(PBRMAP_NODE, &pbr_map_match_dscp_cmd);
+	install_element(PBRMAP_NODE, &pbr_map_match_ecn_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_mark_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_nexthop_group_cmd);
+	install_element(PBRMAP_NODE, &no_pbr_map_nexthop_group_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_nexthop_cmd);
+	install_element(PBRMAP_NODE, &no_pbr_map_nexthop_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_vrf_cmd);
+	install_element(PBRMAP_NODE, &no_pbr_map_vrf_cmd);
 	install_element(VIEW_NODE, &show_pbr_cmd);
 	install_element(VIEW_NODE, &show_pbr_map_cmd);
 	install_element(VIEW_NODE, &show_pbr_interface_cmd);

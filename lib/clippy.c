@@ -51,7 +51,8 @@ int main(int argc, char **argv)
 #if PY_VERSION_HEX >= 0x03040000 /* 3.4 */
 	Py_SetStandardStreamEncoding("UTF-8", NULL);
 #endif
-	Py_SetProgramName(wconv(argv[0]));
+	wchar_t *name = wconv(argv[0]);
+	Py_SetProgramName(name);
 	PyImport_AppendInittab("_clippy", command_py_init);
 
 	Py_Initialize();
@@ -67,6 +68,8 @@ int main(int argc, char **argv)
 		fp = fopen(pyfile, "r");
 		if (!fp) {
 			fprintf(stderr, "%s: %s\n", pyfile, strerror(errno));
+
+			free(name);
 			return 1;
 		}
 	} else {
@@ -85,6 +88,8 @@ int main(int argc, char **argv)
 	if (PyRun_AnyFile(fp, pyfile)) {
 		if (PyErr_Occurred())
 			PyErr_Print();
+
+		free(name);
 		return 1;
 	}
 	Py_Finalize();
@@ -93,6 +98,7 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; i++)
 		free(wargv[i - 1]);
 #endif
+	free(name);
 	free(wargv);
 	return 0;
 }
@@ -107,21 +113,11 @@ int main(int argc, char **argv)
 #include "log.h"
 #include "zassert.h"
 
-#define ZLOG_FUNC(FUNCNAME)                                                    \
-	void FUNCNAME(const char *format, ...)                                 \
-	{                                                                      \
-		va_list args;                                                  \
-		va_start(args, format);                                        \
-		vfprintf(stderr, format, args);                                \
-		fputs("\n", stderr);                                           \
-		va_end(args);                                                  \
-	}
-
-ZLOG_FUNC(zlog_err)
-ZLOG_FUNC(zlog_warn)
-ZLOG_FUNC(zlog_info)
-ZLOG_FUNC(zlog_notice)
-ZLOG_FUNC(zlog_debug)
+void vzlog(int prio, const char *format, va_list args)
+{
+	vfprintf(stderr, format, args);
+	fputs("\n", stderr);
+}
 
 void _zlog_assert_failed(const char *assertion, const char *file,
 			 unsigned int line, const char *function)

@@ -1,52 +1,51 @@
-frr (7.3.1-1) unstable; urgency=medium
+frr (7.5.1-1) unstable; urgency=medium
 
-  [ David Lamparter ]
-  * allow cross-compile with sbuild --host
+  * Update the d/gbp.conf for 7.5.1 release
+  * Use wrap-and-sort -a to unify debian/ wrapping and sorting
+  * Work around the sphinx-build error that doesn't copy images to texinfo
+  * Change the upstream-tag in d/gbp.conf to track the upstream tarballs
+
+ -- Ondřej Surý <ondrej@debian.org>  Mon, 08 Mar 2021 09:40:19 +0100
+
+frr (7.5-1) unstable; urgency=medium
+
+  * New upstream version 7.5
+
+ -- Ondřej Surý <ondrej@debian.org>  Sun, 14 Feb 2021 21:38:50 +0100
+
+frr (7.4-2) unstable; urgency=medium
+
+  * Bump libyang dependency to >= 1.0.184-1~
+  * Make the autopkgtest more resilient (Closes: #980111)
+  * Adjust the ax_python.m4 to hardcode python3.9
+
+ -- Ondřej Surý <ondrej@debian.org>  Sun, 07 Feb 2021 13:15:07 +0100
+
+frr (7.4-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Backport upstream fix for FTBFS with Python 3.9. (Closes: #972767)
+
+ -- Adrian Bunk <bunk@debian.org>  Thu, 21 Jan 2021 16:06:12 +0200
+
+frr (7.4-1) unstable; urgency=medium
 
   [ Ondřej Surý ]
+  * Use dh_installinit capabilities to install frr.tmpfile
+  * Remove unused debian/watchfrr.rc file
+  * Add missing lsof dependency
+  * Remove mention of pkg.frr.snmp build profile from debian/README.Debian
+  * Make lsb-base a hard dependency
+  * Update gbp.conf for 7.4 release
+  * Update and simplify d/watch
+  * Change the debian source format from 3.0 (git) to 3.0 (quilt)
+  * Convert the package to dh compat level 10
   * Add myself to Uploaders
-  * Add d/gbp.conf
-  * Update changelog for 7.3.1-1~1.gbp2292a4 release
-  * Change the source format from git to quilt to use git-buildpackage
-  * Don't install frr-doc texinfo images, they are gone (Closes: #955067)
-  * Bump the dh_compat to 10
+  * Bump standards version to 4.5.0.2 (latest) - no change
+  * Use wrap-and-sort -a to unify debian/ wrapping and sorting
+  * Work around the sphinx-build error that doesn't copy images to texinfo
+    (Properly closes: #955067)
+  * Depend on debhelper >= 9.20160709 and drop dh-systemd dependency
+    (Closes: #958626)
 
- -- Ondřej Surý <ondrej@debian.org>  Mon, 01 Jun 2020 08:41:03 +0200
-
-frr (7.3-1) unstable; urgency=medium
-
-  * new upstream release
-
- -- David Lamparter <equinox-debian@diac24.net>  Tue, 25 Feb 2020 17:45:16 +0100
-
-frr (7.2.1-1) unstable; urgency=medium
-
-  * new upstream release
-  * daemon man pages renamed to frr-* (closes: #944392)
-  * fix/improve multi-arch markers on doc
-  * fix git URLs to point to debian branch
-
- -- David Lamparter <equinox-debian@diac24.net>  Mon, 20 Jan 2020 17:06:21 +0100
-
-frr (7.2-1) unstable; urgency=medium
-
-  * New upstream release
-
- -- Jafar Al-Gharaibeh <jafar@atcorp.com>  Sun, 03 Nov 2019 18:45:23 +0100
-
-frr (6.0.2-2) unstable; urgency=medium
-
-  * remove bogus libjson0 build-dep (closes: #921349)
-  * fix broken systemd dependency spec
-  * add proper Conflicts: for quagga and pimd (closes: #921376)
-
- -- David Lamparter <equinox-debian@diac24.net>  Mon, 04 Feb 2019 22:16:07 +0100
-
-frr (6.0.2-1) unstable; urgency=medium
-
-  * Packaging has been more or less completely reworked, based off the old
-    Quagga packaging that hung around in git.  Refer to "changelog-auto.in"
-    in the source root directory for the old changelog.
-  * Initial release of FRR for Debian. (closes: #863249)
-
- -- David Lamparter <equinox-debian@diac24.net>  Sun, 27 Jan 2019 17:27:02 +0100
+ -- Ondřej Surý <ondrej@debian.org>  Mon, 10 Aug 2020 11:50:45 +0200

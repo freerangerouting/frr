@@ -187,6 +187,7 @@ void ospf_mpls_te_finish(void)
 	// list_delete_all_node(OspfMplsTE.iflist);
 
 	OspfMplsTE.enabled = false;
+	ospf_mpls_te_unregister();
 	OspfMplsTE.inter_as = Off;
 }
 
@@ -1780,7 +1781,7 @@ static uint16_t show_vty_link_subtlv_unrsv_bw(struct vty *vty,
 				i, fval1, i + 1, fval2);
 		else
 			zlog_debug(
-				"      [%d]: %g (Bytes/sec),\t[%d]: %g (Bytes/sec)",
+				"      [%d]: %g (Bytes/sec),  [%d]: %g (Bytes/sec)",
 				i, fval1, i + 1, fval2);
 	}
 
@@ -2119,7 +2120,7 @@ static uint16_t ospf_mpls_te_show_link_subtlv(struct vty *vty,
 
 static void ospf_mpls_te_show_info(struct vty *vty, struct ospf_lsa *lsa)
 {
-	struct lsa_header *lsah = (struct lsa_header *)lsa->data;
+	struct lsa_header *lsah = lsa->data;
 	struct tlv_header *tlvh, *next;
 	uint16_t sum, total;
 	uint16_t (*subfunc)(struct vty * vty, struct tlv_header * tlvh,
@@ -2234,6 +2235,17 @@ DEFUN (no_ospf_mpls_te,
 	for (ALL_LIST_ELEMENTS(OspfMplsTE.iflist, node, nnode, lp))
 		if (CHECK_FLAG(lp->flags, LPFLG_LSA_ENGAGED))
 			ospf_mpls_te_lsa_schedule(lp, FLUSH_THIS_LSA);
+
+	/*
+	 * This resets the OspfMplsTE.inter_as to its initial state.
+	 * This is to avoid having an inter-as value different from
+	 * Off when mpls-te gets restarted (after being removed)
+	 */
+	if (OspfMplsTE.inter_as != Off) {
+		/* Deregister the Callbacks for Inter-AS support */
+		ospf_mpls_te_unregister();
+		OspfMplsTE.inter_as = Off;
+	}
 
 	return CMD_SUCCESS;
 }

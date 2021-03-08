@@ -157,13 +157,13 @@ static int qmem_exit_walker(void *arg, struct memgroup *mg, struct memtype *mt)
 
 	if (!mt) {
 		fprintf(eda->fp,
-			"%s: showing active allocations in "
-			"memory group %s\n",
+			"%s: showing active allocations in memory group %s\n",
 			eda->prefix, mg->name);
 
 	} else if (mt->n_alloc) {
 		char size[32];
-		eda->error++;
+		if (!mg->active_at_exit)
+			eda->error++;
 		snprintf(size, sizeof(size), "%10zu", mt->size);
 		fprintf(eda->fp, "%s: memstats:  %-30s: %6zu * %s\n",
 			eda->prefix, mt->name, mt->n_alloc,

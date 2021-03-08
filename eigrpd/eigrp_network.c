@@ -160,8 +160,7 @@ int eigrp_if_ipmulticast(struct eigrp *top, struct prefix *p,
 	ret = setsockopt_ipv4_multicast_if(top->fd, p->u.prefix4, ifindex);
 	if (ret < 0)
 		zlog_warn(
-			"can't setsockopt IP_MULTICAST_IF (fd %d, addr %s, "
-			"ifindex %u): %s",
+			"can't setsockopt IP_MULTICAST_IF (fd %d, addr %s, ifindex %u): %s",
 			top->fd, inet_ntoa(p->u.prefix4), ifindex,
 			safe_strerror(errno));
 
@@ -179,9 +178,7 @@ int eigrp_if_add_allspfrouters(struct eigrp *top, struct prefix *p,
 		htonl(EIGRP_MULTICAST_ADDRESS), ifindex);
 	if (ret < 0)
 		zlog_warn(
-			"can't setsockopt IP_ADD_MEMBERSHIP (fd %d, addr %s, "
-			"ifindex %u, AllSPFRouters): %s; perhaps a kernel limit "
-			"on # of multicast group memberships has been exceeded?",
+			"can't setsockopt IP_ADD_MEMBERSHIP (fd %d, addr %s, ifindex %u, AllSPFRouters): %s; perhaps a kernel limit on # of multicast group memberships has been exceeded?",
 			top->fd, inet_ntoa(p->u.prefix4), ifindex,
 			safe_strerror(errno));
 	else
@@ -201,8 +198,7 @@ int eigrp_if_drop_allspfrouters(struct eigrp *top, struct prefix *p,
 		htonl(EIGRP_MULTICAST_ADDRESS), ifindex);
 	if (ret < 0)
 		zlog_warn(
-			"can't setsockopt IP_DROP_MEMBERSHIP (fd %d, addr %s, "
-			"ifindex %u, AllSPFRouters): %s",
+			"can't setsockopt IP_DROP_MEMBERSHIP (fd %d, addr %s, ifindex %u, AllSPFRouters): %s",
 			top->fd, inet_ntoa(p->u.prefix4), ifindex,
 			safe_strerror(errno));
 	else
@@ -218,7 +214,7 @@ int eigrp_network_set(struct eigrp *eigrp, struct prefix *p)
 	struct route_node *rn;
 	struct interface *ifp;
 
-	rn = route_node_get(eigrp->networks, (struct prefix *)p);
+	rn = route_node_get(eigrp->networks, p);
 	if (rn->info) {
 		/* There is already same network statement. */
 		route_unlock_node(rn);
@@ -230,7 +226,7 @@ int eigrp_network_set(struct eigrp *eigrp, struct prefix *p)
 	rn->info = (void *)pref;
 
 	/* Schedule Router ID Update. */
-	if (eigrp->router_id.s_addr == 0)
+	if (eigrp->router_id.s_addr == INADDR_ANY)
 		eigrp_router_id_update(eigrp);
 	/* Run network config now. */
 	/* Get target interface. */

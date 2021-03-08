@@ -62,7 +62,7 @@ static const uint8_t ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
 static const uint8_t ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
 #endif
 
-static uint8_t sock_buff[8192];
+static uint8_t sock_buff[16384];
 
 static unsigned short pf_filter[] = {
 	ENF_PUSHWORD + 0,       /* Get the SSAP/DSAP values */
@@ -566,8 +566,7 @@ int isis_send_pdu_bcast(struct isis_circuit *circuit, int level)
 	buflen = stream_get_endp(circuit->snd_stream) + LLC_LEN;
 	if ((size_t)buflen > sizeof(sock_buff)) {
 		zlog_warn(
-			"isis_send_pdu_bcast: sock_buff size %zu is less than "
-			"output pdu size %d on circuit %s",
+			"isis_send_pdu_bcast: sock_buff size %zu is less than output pdu size %d on circuit %s",
 			sizeof(sock_buff), buflen, circuit->interface->name);
 		return ISIS_WARNING;
 	}

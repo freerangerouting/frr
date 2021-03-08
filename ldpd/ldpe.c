@@ -41,13 +41,15 @@ static int	 ldpe_dispatch_pfkey(struct thread *);
 #endif
 static void	 ldpe_setup_sockets(int, int, int, int);
 static void	 ldpe_close_sockets(int);
-static void	 ldpe_iface_af_ctl(struct ctl_conn *, int, unsigned int);
+static void	 ldpe_iface_af_ctl(struct ctl_conn *c, int af, ifindex_t ifidx);
+static void	 ldpe_check_filter_af(int, struct ldpd_af_conf *, const char *);
 
 struct ldpd_conf	*leconf;
 #ifdef __OpenBSD__
 struct ldpd_sysdep	 sysdep;
 #endif
 
+static struct imsgev    iev_main_data;
 static struct imsgev	*iev_main, *iev_main_sync;
 static struct imsgev	*iev_lde;
 #ifdef __OpenBSD__
@@ -123,8 +125,8 @@ ldpe(void)
 		        &iev_main->ev_read);
 	iev_main->handler_write = ldp_write_handler;
 
-	if ((iev_main_sync = calloc(1, sizeof(struct imsgev))) == NULL)
-		fatal(NULL);
+	memset(&iev_main_data, 0, sizeof(iev_main_data));
+	iev_main_sync = &iev_main_data;
 	imsg_init(&iev_main_sync->ibuf, LDPD_FD_SYNC);
 
 	/* create base configuration */
@@ -230,10 +232,12 @@ ldpe_shutdown(void)
 	if (iev_lde)
 		free(iev_lde);
 	free(iev_main);
-	free(iev_main_sync);
 	free(pkt_ptr);
 
 	log_info("ldp engine exiting");
+
+	zlog_fini();
+
 	exit(0);
 }
 
@@ -292,7 +296,8 @@ ldpe_dispatch_main(struct thread *thread)
 	struct nbr_params	*nbrp;
 #endif
 	int			 n, shut = 0;
-
+	struct ldp_access       *laccess;
+	
 	iev->ev_read = NULL;
 
 	if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
@@ -350,13 +355,11 @@ ldpe_dispatch_main(struct thread *thread)
 			break;
 		case IMSG_SOCKET_IPC:
 			if (iev_lde) {
-				log_warnx("%s: received unexpected imsg fd "
-				    "to lde", __func__);
+				log_warnx("%s: received unexpected imsg fd to lde", __func__);
 				break;
 			}
 			if ((fd = imsg.fd) == -1) {
-				log_warnx("%s: expected to receive imsg fd to "
-				    "lde but didn't receive any", __func__);
+				log_warnx("%s: expected to receive imsg fd to lde but didn't receive any", __func__);
 				break;
 			}
 
@@ -544,6 +547,18 @@ ldpe_dispatch_main(struct thread *thread)
 			}
 			memcpy(&ldp_debug, imsg.data, sizeof(ldp_debug));
 			break;
+		case IMSG_FILTER_UPDATE:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct ldp_access)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			laccess = imsg.data;
+			ldpe_check_filter_af(AF_INET, &leconf->ipv4,
+				laccess->name);
+			ldpe_check_filter_af(AF_INET6, &leconf->ipv6,
+				laccess->name);
+			break;
 		default:
 			log_debug("ldpe_dispatch_main: error handling imsg %d",
 			    imsg.hdr.type);
@@ -599,11 +614,8 @@ ldpe_dispatch_lde(struct thread *thread)
 			map = imsg.data;
 
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
-			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+			if (nbr == NULL)
 				break;
-			}
 			if (nbr->state != NBR_STA_OPER)
 				break;
 
@@ -627,11 +639,8 @@ ldpe_dispatch_lde(struct thread *thread)
 		case IMSG_REQUEST_ADD_END:
 		case IMSG_WITHDRAW_ADD_END:
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
-			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+			if (nbr == NULL)
 				break;
-			}
 			if (nbr->state != NBR_STA_OPER)
 				break;
 
@@ -662,8 +671,7 @@ ldpe_dispatch_lde(struct thread *thread)
 
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
 			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+				log_debug("ldpe_dispatch_lde: cannot find neighbor");
 				break;
 			}
 			if (nbr->state != NBR_STA_OPER)
@@ -679,6 +687,16 @@ ldpe_dispatch_lde(struct thread *thread)
 		case IMSG_CTL_SHOW_L2VPN_PW:
 		case IMSG_CTL_SHOW_L2VPN_BINDING:
 			control_imsg_relay(&imsg);
+			break;
+		case IMSG_NBR_SHUTDOWN:
+			nbr = nbr_find_peerid(imsg.hdr.peerid);
+			if (nbr == NULL) {
+				log_debug("ldpe_dispatch_lde: cannot find neighbor");
+				break;
+			}
+			if (nbr->state != NBR_STA_OPER)
+				break;
+			session_shutdown(nbr,S_SHUTDOWN,0,0);
 			break;
 		default:
 			log_debug("ldpe_dispatch_lde: error handling imsg %d",
@@ -827,7 +845,7 @@ ldpe_stop_init_backoff(int af)
 }
 
 static void
-ldpe_iface_af_ctl(struct ctl_conn *c, int af, unsigned int idx)
+ldpe_iface_af_ctl(struct ctl_conn *c, int af, ifindex_t idx)
 {
 	struct iface		*iface;
 	struct iface_af		*ia;
@@ -847,7 +865,7 @@ ldpe_iface_af_ctl(struct ctl_conn *c, int af, unsigned int idx)
 }
 
 void
-ldpe_iface_ctl(struct ctl_conn *c, unsigned int idx)
+ldpe_iface_ctl(struct ctl_conn *c, ifindex_t idx)
 {
 	ldpe_iface_af_ctl(c, AF_INET, idx);
 	ldpe_iface_af_ctl(c, AF_INET6, idx);
@@ -979,4 +997,12 @@ mapping_list_clr(struct mapping_head *mh)
 		assert(me != TAILQ_FIRST(mh));
 		free(me);
 	}
+}
+
+void
+ldpe_check_filter_af(int af, struct ldpd_af_conf *af_conf,
+    const char *filter_name)
+{
+	if (strcmp(af_conf->acl_thello_accept_from, filter_name) == 0)
+		ldpe_remove_dynamic_tnbrs(af);
 }

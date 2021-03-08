@@ -55,6 +55,7 @@
 #define PIM_IF_DONT_PIM_CAN_DISABLE_JOIN_SUPRESSION(options) ((options) &= ~PIM_IF_MASK_PIM_CAN_DISABLE_JOIN_SUPRESSION)
 
 #define PIM_I_am_DR(pim_ifp) (pim_ifp)->pim_dr_addr.s_addr == (pim_ifp)->primary_address.s_addr
+#define PIM_I_am_DualActive(pim_ifp) (pim_ifp)->activeactive == true
 
 struct pim_iface_upstream_switch {
 	struct in_addr address;
@@ -132,6 +133,7 @@ struct pim_interface {
 
 	/* Turn on Active-Active for this interface */
 	bool activeactive;
+	bool am_i_dr;
 
 	int64_t pim_ifstat_start; /* start timestamp for stats */
 	uint64_t pim_ifstat_bsm_rx;
@@ -221,7 +223,7 @@ void pim_if_update_assert_tracking_desired(struct interface *ifp);
 
 void pim_if_create_pimreg(struct pim_instance *pim);
 
-int pim_if_connected_to_source(struct interface *ifp, struct in_addr src);
+struct prefix *pim_if_connected_to_source(struct interface *ifp, struct in_addr src);
 int pim_update_source_set(struct interface *ifp, struct in_addr source);
 
 bool pim_if_is_vrf_device(struct interface *ifp);

@@ -149,6 +149,16 @@ static int bmp_qhash_cmp(const struct bmp_queue_entry *a,
 		const struct bmp_queue_entry *b)
 {
 	int ret;
+	if (a->afi == AFI_L2VPN && a->safi == SAFI_EVPN && b->afi == AFI_L2VPN
+	    && b->safi == SAFI_EVPN) {
+		ret = prefix_cmp(&a->rd, &b->rd);
+		if (ret)
+			return ret;
+	} else if (a->afi == AFI_L2VPN && a->safi == SAFI_EVPN)
+		return 1;
+	else if (b->afi == AFI_L2VPN && b->safi == SAFI_EVPN)
+		return -1;
+
 	ret = prefix_cmp(&a->p, &b->p);
 	if (ret)
 		return ret;
@@ -164,9 +174,16 @@ static uint32_t bmp_qhash_hkey(const struct bmp_queue_entry *e)
 
 	key = prefix_hash_key((void *)&e->p);
 	key = jhash(&e->peerid,
-			offsetof(struct bmp_queue_entry, refcount) -
-			offsetof(struct bmp_queue_entry, peerid),
-			key);
+		    offsetof(struct bmp_queue_entry, refcount)
+			    - offsetof(struct bmp_queue_entry, peerid),
+		    key);
+	if (e->afi == AFI_L2VPN && e->safi == SAFI_EVPN)
+		key = jhash(&e->rd,
+			    offsetof(struct bmp_queue_entry, rd)
+				    - offsetof(struct bmp_queue_entry, refcount)
+				    + PSIZE(e->rd.prefixlen),
+			    key);
+
 	return key;
 }
 
@@ -385,15 +402,15 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 			stream_put(s, bbpeer->open_tx, bbpeer->open_tx_len);
 		else {
 			stream_put(s, dummy_open, sizeof(dummy_open));
-			zlog_warn("bmp: missing TX OPEN message for peer %s\n",
-					peer->host);
+			zlog_warn("bmp: missing TX OPEN message for peer %s",
+				  peer->host);
 		}
 		if (bbpeer && bbpeer->open_rx)
 			stream_put(s, bbpeer->open_rx, bbpeer->open_rx_len);
 		else {
 			stream_put(s, dummy_open, sizeof(dummy_open));
-			zlog_warn("bmp: missing RX OPEN message for peer %s\n",
-					peer->host);
+			zlog_warn("bmp: missing RX OPEN message for peer %s",
+				  peer->host);
 		}
 
 		if (peer->desc)
@@ -417,10 +434,19 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 		case PEER_DOWN_CLOSE_SESSION:
 			type = BMP_PEERDOWN_REMOTE_CLOSE;
 			break;
+		case PEER_DOWN_WAITING_NHT:
+			type = BMP_PEERDOWN_LOCAL_FSM;
+			stream_putw(s, BGP_FSM_TcpConnectionFails);
+			break;
+		/*
+		 * TODO: Map remaining PEER_DOWN_* reasons to RFC event codes.
+		 * TODO: Implement BMP_PEERDOWN_LOCAL_NOTIFY.
+		 *
+		 * See RFC7854 ss. 4.9
+		 */
 		default:
-			type = BMP_PEERDOWN_LOCAL_NOTIFY;
-			stream_put(s, peer->last_reset_cause,
-					peer->last_reset_cause_size);
+			type = BMP_PEERDOWN_LOCAL_FSM;
+			stream_putw(s, BMP_PEER_DOWN_NO_RELEVANT_EVENT_CODE);
 			break;
 		}
 		stream_putc_at(s, type_pos, type);
@@ -664,8 +690,7 @@ static int bmp_peer_established(struct peer *peer)
 		return 0;
 
 	/* Check if this peer just went to Established */
-	if ((peer->last_major_event != OpenConfirm) ||
-	    !(peer_established(peer)))
+	if ((peer->ostatus != OpenConfirm) || !(peer_established(peer)))
 		return 0;
 
 	if (peer->doppelganger && (peer->doppelganger->status != Deleted)) {
@@ -766,8 +791,9 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags)
 	stream_free(s);
 }
 
-static struct stream *bmp_update(struct prefix *p, struct peer *peer,
-		struct attr *attr, afi_t afi, safi_t safi)
+static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
+				 struct peer *peer, struct attr *attr,
+				 afi_t afi, safi_t safi)
 {
 	struct bpacket_attr_vec_arr vecarr;
 	struct stream *s;
@@ -802,8 +828,8 @@ static struct stream *bmp_update(struct prefix *p, struct peer *peer,
 
 		mpattrlen_pos = bgp_packet_mpattr_start(s, peer, afi, safi,
 				&vecarr, attr);
-		bgp_packet_mpattr_prefix(s, afi, safi, p, NULL, NULL, 0,
-				0, 0, attr);
+		bgp_packet_mpattr_prefix(s, afi, safi, p, prd, NULL, 0, 0, 0,
+					 attr);
 		bgp_packet_mpattr_end(s, mpattrlen_pos);
 		total_attr_len += stream_get_endp(s) - p1;
 	}
@@ -814,7 +840,9 @@ static struct stream *bmp_update(struct prefix *p, struct peer *peer,
 	return s;
 }
 
-static struct stream *bmp_withdraw(struct prefix *p, afi_t afi, safi_t safi)
+static struct stream *bmp_withdraw(const struct prefix *p,
+				   struct prefix_rd *prd, afi_t afi,
+				   safi_t safi)
 {
 	struct stream *s;
 	size_t attrlen_pos = 0, mp_start, mplen_pos;
@@ -839,8 +867,8 @@ static struct stream *bmp_withdraw(struct prefix *p, afi_t afi, safi_t safi)
 		mp_start = stream_get_endp(s);
 		mplen_pos = bgp_packet_mpunreach_start(s, afi, safi);
 
-		bgp_packet_mpunreach_prefix(s, p, afi, safi, NULL, NULL, 0,
-				0, 0, NULL);
+		bgp_packet_mpunreach_prefix(s, p, afi, safi, prd, NULL, 0, 0, 0,
+					    NULL);
 		/* Set the mp_unreach attr's length */
 		bgp_packet_mpunreach_end(s, mplen_pos);
 
@@ -854,20 +882,23 @@ static struct stream *bmp_withdraw(struct prefix *p, afi_t afi, safi_t safi)
 }
 
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
-			struct prefix *p, struct attr *attr, afi_t afi,
-			safi_t safi, time_t uptime)
+			const struct prefix *p, struct prefix_rd *prd,
+			struct attr *attr, afi_t afi, safi_t safi,
+			time_t uptime)
 {
 	struct stream *hdr, *msg;
 	struct timeval tv = { .tv_sec = uptime, .tv_usec = 0 };
+	struct timeval uptime_real;
 
+	monotime_to_realtime(&tv, &uptime_real);
 	if (attr)
-		msg = bmp_update(p, peer, attr, afi, safi);
+		msg = bmp_update(p, prd, peer, attr, afi, safi);
 	else
-		msg = bmp_withdraw(p, afi, safi);
+		msg = bmp_withdraw(p, prd, afi, safi);
 
 	hdr = stream_new(BGP_MAX_PACKET_SIZE);
 	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
-	bmp_per_peer_hdr(hdr, peer, flags, &tv);
+	bmp_per_peer_hdr(hdr, peer, flags, &uptime_real);
 
 	stream_putl_at(hdr, BMP_LENGTH_POS,
 			stream_get_endp(hdr) + stream_get_endp(msg));
@@ -896,6 +927,7 @@ static bool bmp_wrsync(struct bmp *bmp, struct pullwr *pullwr)
 			bmp->syncpeerid = 0;
 			memset(&bmp->syncpos, 0, sizeof(bmp->syncpos));
 			bmp->syncpos.family = afi2family(afi);
+			bmp->syncrdpos = NULL;
 			zlog_info("bmp[%s] %s %s sending table",
 					bmp->remote,
 					afi2str(bmp->syncafi),
@@ -920,15 +952,58 @@ afibreak:
 	}
 
 	struct bgp_table *table = bmp->targets->bgp->rib[afi][safi];
-	struct bgp_node *bn;
+	struct bgp_dest *bn;
 	struct bgp_path_info *bpi = NULL, *bpiter;
 	struct bgp_adj_in *adjin = NULL, *adjiter;
+
+	if (afi == AFI_L2VPN && safi == SAFI_EVPN) {
+		/* initialize syncrdpos to the first
+		 * mid-layer table entry
+		 */
+		if (!bmp->syncrdpos) {
+			bmp->syncrdpos = bgp_table_top(table);
+			if (!bmp->syncrdpos)
+				goto eor;
+		}
+
+		/* look for a valid mid-layer table */
+		do {
+			table = bgp_dest_get_bgp_table_info(bmp->syncrdpos);
+			if (table) {
+				break;
+			}
+			bmp->syncrdpos = bgp_route_next(bmp->syncrdpos);
+		} while (bmp->syncrdpos);
+
+		/* mid-layer table completed */
+		if (!bmp->syncrdpos)
+			goto eor;
+	}
 
 	bn = bgp_node_lookup(table, &bmp->syncpos);
 	do {
 		if (!bn) {
 			bn = bgp_table_get_next(table, &bmp->syncpos);
 			if (!bn) {
+				if (afi == AFI_L2VPN && safi == SAFI_EVPN) {
+					/* reset bottom-layer pointer */
+					memset(&bmp->syncpos, 0,
+					       sizeof(bmp->syncpos));
+					bmp->syncpos.family = afi2family(afi);
+					/* check whethere there is a valid
+					 * next mid-layer table, otherwise
+					 * declare table completed (eor)
+					 */
+					for (bmp->syncrdpos = bgp_route_next(
+						     bmp->syncrdpos);
+					     bmp->syncrdpos;
+					     bmp->syncrdpos = bgp_route_next(
+						     bmp->syncrdpos))
+						if (bgp_dest_get_bgp_table_info(
+							    bmp->syncrdpos))
+							return true;
+				}
+			eor:
 				zlog_info("bmp[%s] %s %s table completed (EoR)",
 						bmp->remote, afi2str(afi),
 						safi2str(safi));
@@ -941,11 +1016,12 @@ afibreak:
 				return true;
 			}
 			bmp->syncpeerid = 0;
-			prefix_copy(&bmp->syncpos, &bn->p);
+			prefix_copy(&bmp->syncpos, bgp_dest_get_prefix(bn));
 		}
 
 		if (bmp->targets->afimon[afi][safi] & BMP_MON_POSTPOLICY) {
-			for (bpiter = bn->info; bpiter; bpiter = bpiter->next) {
+			for (bpiter = bgp_dest_get_bgp_path_info(bn); bpiter;
+			     bpiter = bpiter->next) {
 				if (!CHECK_FLAG(bpiter->flags, BGP_PATH_VALID))
 					continue;
 				if (bpiter->peer->qobj_node.nid
@@ -989,12 +1065,17 @@ afibreak:
 		bmp->syncpeerid = adjin->peer->qobj_node.nid;
 	}
 
+	const struct prefix *bn_p = bgp_dest_get_prefix(bn);
+	struct prefix_rd *prd = NULL;
+	if (afi == AFI_L2VPN && safi == SAFI_EVPN)
+		prd = (struct prefix_rd *)bgp_dest_get_prefix(bmp->syncrdpos);
+
 	if (bpi)
-		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L, &bn->p, bpi->attr,
-			    afi, safi, bpi->uptime);
+		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L, bn_p, prd,
+			    bpi->attr, afi, safi, bpi->uptime);
 	if (adjin)
-		bmp_monitor(bmp, adjin->peer, 0, &bn->p, adjin->attr,
-			    afi, safi, adjin->uptime);
+		bmp_monitor(bmp, adjin->peer, 0, bn_p, prd, adjin->attr, afi,
+			    safi, adjin->uptime);
 
 	return true;
 }
@@ -1021,7 +1102,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 {
 	struct bmp_queue_entry *bqe;
 	struct peer *peer;
-	struct bgp_node *bn;
+	struct bgp_dest *bn;
 	bool written = false;
 
 	bqe = bmp_pull(bmp);
@@ -1057,18 +1138,22 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 		goto out;
 
 	bn = bgp_node_lookup(bmp->targets->bgp->rib[afi][safi], &bqe->p);
+	struct prefix_rd *prd = NULL;
+	if (bqe->afi == AFI_L2VPN && bqe->safi == SAFI_EVPN)
+		prd = &bqe->rd;
 
 	if (bmp->targets->afimon[afi][safi] & BMP_MON_POSTPOLICY) {
 		struct bgp_path_info *bpi;
 
-		for (bpi = bn ? bn->info : NULL; bpi; bpi = bpi->next) {
+		for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
+		     bpi = bpi->next) {
 			if (!CHECK_FLAG(bpi->flags, BGP_PATH_VALID))
 				continue;
 			if (bpi->peer == peer)
 				break;
 		}
 
-		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p,
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi, safi,
 			    bpi ? bpi->uptime : monotime(NULL));
 		written = true;
@@ -1082,7 +1167,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 			if (adjin->peer == peer)
 				break;
 		}
-		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p,
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p, prd,
 			    adjin ? adjin->attr : NULL, afi, safi,
 			    adjin ? adjin->uptime : monotime(NULL));
 		written = true;
@@ -1125,25 +1210,26 @@ static void bmp_wrerr(struct bmp *bmp, struct pullwr *pullwr, bool eof)
 	bmp_free(bmp);
 }
 
-static void bmp_process_one(struct bmp_targets *bt, struct bgp *bgp,
-		afi_t afi, safi_t safi, struct bgp_node *bn, struct peer *peer)
+static void bmp_process_one(struct bmp_targets *bt, struct bgp *bgp, afi_t afi,
+			    safi_t safi, struct bgp_dest *bn, struct peer *peer)
 {
 	struct bmp *bmp;
 	struct bmp_queue_entry *bqe, bqeref;
 	size_t refcount;
-	char buf[256];
-
-	prefix2str(&bn->p, buf, sizeof(buf));
 
 	refcount = bmp_session_count(&bt->sessions);
 	if (refcount == 0)
 		return;
 
 	memset(&bqeref, 0, sizeof(bqeref));
-	prefix_copy(&bqeref.p, &bn->p);
+	prefix_copy(&bqeref.p, bgp_dest_get_prefix(bn));
 	bqeref.peerid = peer->qobj_node.nid;
 	bqeref.afi = afi;
 	bqeref.safi = safi;
+
+	if (afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest)
+		prefix_copy(&bqeref.rd,
+			    (struct prefix_rd *)bgp_dest_get_prefix(bn->pdest));
 
 	bqe = bmp_qhash_find(&bt->updhash, &bqeref);
 	if (bqe) {
@@ -1168,7 +1254,7 @@ static void bmp_process_one(struct bmp_targets *bt, struct bgp *bgp,
 }
 
 static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
-			struct bgp_node *bn, struct peer *peer, bool withdraw)
+		       struct bgp_dest *bn, struct peer *peer, bool withdraw)
 {
 	struct bmp_bgp *bmpbgp = bmp_bgp_find(peer->bgp);
 	struct bmp_targets *bt;
@@ -1343,8 +1429,7 @@ static int bmp_accept(struct thread *thread)
 	/* We can handle IPv4 or IPv6 socket. */
 	bmp_sock = sockunion_accept(bl->sock, &su);
 	if (bmp_sock < 0) {
-		zlog_info("bmp: accept_sock failed: %s\n",
-                          safe_strerror (errno));
+		zlog_info("bmp: accept_sock failed: %s", safe_strerror(errno));
 		return -1;
 	}
 	bmp_open(bl->targets, bmp_sock);
@@ -1774,7 +1859,12 @@ static void bmp_active_setup(struct bmp_active *ba)
 	}
 }
 
-static struct cmd_node bmp_node = {BMP_NODE, "%s(config-bgp-bmp)# "};
+static struct cmd_node bmp_node = {
+	.name = "bmp",
+	.node = BMP_NODE,
+	.parent_node = BGP_NODE,
+	.prompt = "%s(config-bgp-bmp)# "
+};
 
 #define BMP_STR "BGP Monitoring Protocol\n"
 
@@ -1864,9 +1954,7 @@ DEFPY(no_bmp_listener_main,
 
 DEFPY(bmp_connect,
       bmp_connect_cmd,
-      "[no] bmp connect HOSTNAME port (1-65535) "
-		"{min-retry (100-86400000)"
-		"|max-retry (100-86400000)}",
+      "[no] bmp connect HOSTNAME port (1-65535) {min-retry (100-86400000)|max-retry (100-86400000)}",
       NO_STR
       BMP_STR
       "Actively establish connection to monitoring station\n"
@@ -1955,13 +2043,12 @@ DEFPY(bmp_stats_cfg,
 
 DEFPY(bmp_monitor_cfg,
       bmp_monitor_cmd,
-      "[no] bmp monitor "BGP_AFI_CMD_STR" <unicast|multicast> <pre-policy|post-policy>$policy",
+      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn> <pre-policy|post-policy>$policy",
       NO_STR
       BMP_STR
       "Send BMP route monitoring messages\n"
-      BGP_AFI_HELP_STR
-      "Address family modifier\n"
-      "Address family modifier\n"
+      "Address Family\nAddress Family\nAddress Family\n"
+      "Address Family\nAddress Family\nAddress Family\n"
       "Send state before policy and filter processing\n"
       "Send state with policy and filters applied\n")
 {
@@ -2268,7 +2355,7 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 
 static int bgp_bmp_init(struct thread_master *tm)
 {
-	install_node(&bmp_node, NULL);
+	install_node(&bmp_node);
 	install_default(BMP_NODE);
 	install_element(BGP_NODE, &bmp_targets_cmd);
 	install_element(BGP_NODE, &no_bmp_targets_cmd);

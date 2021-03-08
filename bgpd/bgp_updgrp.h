@@ -208,7 +208,7 @@ struct update_subgroup {
 	struct bgp_synchronize *sync;
 
 	/* send prefix count */
-	unsigned long scount;
+	uint32_t scount;
 
 	/* announcement attribute hash */
 	struct hash *hash;
@@ -292,7 +292,7 @@ typedef int (*updgrp_walkcb)(struct update_group *updgrp, void *ctx);
 /* really a private structure */
 struct updwalk_context {
 	struct vty *vty;
-	struct bgp_node *rn;
+	struct bgp_dest *dest;
 	struct bgp_path_info *pi;
 	uint64_t updgrp_id;
 	uint64_t subgrp_id;
@@ -373,9 +373,9 @@ extern void update_subgroup_remove_peer(struct update_subgroup *,
 					struct peer_af *);
 extern struct bgp_table *update_subgroup_rib(struct update_subgroup *);
 extern void update_subgroup_split_peer(struct peer_af *, struct update_group *);
-extern int update_subgroup_check_merge(struct update_subgroup *, const char *);
-extern int update_subgroup_trigger_merge_check(struct update_subgroup *,
-					       int force);
+extern bool update_subgroup_check_merge(struct update_subgroup *, const char *);
+extern bool update_subgroup_trigger_merge_check(struct update_subgroup *,
+						int force);
 extern void update_group_policy_update(struct bgp *bgp, bgp_policy_type_e ptype,
 				       const char *pname, int route_update,
 				       int start_event);
@@ -404,13 +404,13 @@ extern struct bpacket *bpacket_queue_first(struct bpacket_queue *q);
 struct bpacket *bpacket_queue_last(struct bpacket_queue *q);
 unsigned int bpacket_queue_length(struct bpacket_queue *q);
 unsigned int bpacket_queue_hwm_length(struct bpacket_queue *q);
-int bpacket_queue_is_full(struct bgp *bgp, struct bpacket_queue *q);
+bool bpacket_queue_is_full(struct bgp *bgp, struct bpacket_queue *q);
 extern void bpacket_queue_advance_peer(struct peer_af *paf);
 extern void bpacket_queue_remove_peer(struct peer_af *paf);
 extern void bpacket_add_peer(struct bpacket *pkt, struct peer_af *paf);
 unsigned int bpacket_queue_virtual_length(struct peer_af *paf);
 extern void bpacket_queue_show_vty(struct bpacket_queue *q, struct vty *vty);
-int subgroup_packets_to_build(struct update_subgroup *subgrp);
+bool subgroup_packets_to_build(struct update_subgroup *subgrp);
 extern struct bpacket *subgroup_update_packet(struct update_subgroup *s);
 extern struct bpacket *subgroup_withdraw_packet(struct update_subgroup *s);
 extern struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
@@ -442,22 +442,23 @@ extern void subgroup_announce_all(struct update_subgroup *subgrp);
 extern void subgroup_default_originate(struct update_subgroup *subgrp,
 				       int withdraw);
 extern void group_announce_route(struct bgp *bgp, afi_t afi, safi_t safi,
-				 struct bgp_node *rn, struct bgp_path_info *pi);
+				 struct bgp_dest *dest,
+				 struct bgp_path_info *pi);
 extern void subgroup_clear_table(struct update_subgroup *subgrp);
 extern void update_group_announce(struct bgp *bgp);
 extern void update_group_announce_rrclients(struct bgp *bgp);
 extern void peer_af_announce_route(struct peer_af *paf, int combine);
 extern struct bgp_adj_out *bgp_adj_out_alloc(struct update_subgroup *subgrp,
-					     struct bgp_node *rn,
+					     struct bgp_dest *dest,
 					     uint32_t addpath_tx_id);
-extern void bgp_adj_out_remove_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_remove_subgroup(struct bgp_dest *dest,
 					struct bgp_adj_out *adj,
 					struct update_subgroup *subgrp);
-extern void bgp_adj_out_set_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 				     struct update_subgroup *subgrp,
 				     struct attr *attr,
 				     struct bgp_path_info *path);
-extern void bgp_adj_out_unset_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       struct update_subgroup *subgrp,
 				       char withdraw, uint32_t addpath_tx_id);
 void subgroup_announce_table(struct update_subgroup *subgrp,
