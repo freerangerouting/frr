@@ -12,13 +12,20 @@ topology_only = False
 
 def pytest_addoption(parser):
     """
-    Add topology-only option to the topology tester. This option makes pytest
-    only run the setup_module() to setup the topology without running any tests.
+    Add CLI options to the topology tester.
+    --topology-only: Make pytest only run the setup_module() to setup the
+                     topology without running any tests.
+    --runall: Make pytest run all tests, including those marked skip_by_default
     """
     parser.addoption(
         "--topology-only",
         action="store_true",
         help="Only set up this topology, don't run tests",
+    )
+    parser.addoption(
+        "--runall",
+        action="store_true",
+        help="Run all tests, including those disabled by default",
     )
 
 
@@ -62,6 +69,10 @@ def pytest_configure(config):
     if config.getoption("--topology-only"):
         topology_only = True
 
+    config.addinivalue_line(
+        "markers", "skip_by_default: mark test as to be run only on request"
+    )
+
 
 def pytest_runtest_makereport(item, call):
     "Log all assert messages to default logger with error level"
@@ -92,3 +103,16 @@ def pytest_runtest_makereport(item, call):
     if tgen is not None:
         # This will cause topogen to report error on `routers_have_failure`.
         tgen.set_error("{}/{}".format(modname, item.name))
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--runall"):
+        # --runall given in CLI: don't skip test cases decorated using
+        # @pytest.mark.skip_by_default
+        # and modules containing
+        # pytestmark = pytest.mark.skip_by_default
+        return
+    skip_marker = pytest.mark.skip(reason="need --runall option to run")
+    for item in items:
+        if "skip_by_default" in item.keywords:
+            item.add_marker(skip_marker)
