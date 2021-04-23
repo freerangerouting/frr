@@ -65,6 +65,16 @@ struct vtysh_client {
 	struct vtysh_client *next;
 };
 
+/* Info about daemons with multi-instance support */
+struct vtysh_multi_instance_daemon {
+	int flag;
+	const char *name;
+	const char *prefix;
+} vtysh_multi_instance_daemon[] = {
+	{.flag = VTYSH_OSPFD, .name = "ospfd", .prefix = "ospfd-"},
+	{.flag = VTYSH_OSPF6D, .name = "ospf6d", .prefix = "ospf6d-"},
+};
+
 /* Some utility functions for working on vtysh-specific vty tasks */
 
 static FILE *vty_open_pager(struct vty *vty)
@@ -459,6 +469,11 @@ static void vtysh_client_config(struct vtysh_client *head_client, char *line)
 	vty->of = vty->of_saved;
 }
 
+static bool any_instance_connected(struct vtysh_client *client)
+{
+	return (client->fd >= 0 || client->next);
+}
+
 /* Command execution over the vty interface. */
 static int vtysh_execute_func(const char *line, int pager)
 {
@@ -630,12 +645,8 @@ static int vtysh_execute_func(const char *line, int pager)
 				}
 				if (vtysh_client[i].fd < 0
 				    && (cmd->daemon == vtysh_client[i].flag)) {
-					bool any_inst = false;
-					for (vc = &vtysh_client[i]; vc;
-					     vc = vc->next)
-						any_inst = any_inst
-							   || (vc->fd > 0);
-					if (!any_inst) {
+					if (!any_instance_connected(
+						    &vtysh_client[i])) {
 						fprintf(stderr,
 							"%s is not running\n",
 							vtysh_client[i].name);
@@ -1976,8 +1987,8 @@ DEFUNSH(VTYSH_BABELD, router_babel, router_babel_cmd, "router babel",
 #endif /* HAVE_BABELD */
 
 #ifdef HAVE_OSPF6D
-DEFUNSH(VTYSH_OSPF6D, router_ospf6, router_ospf6_cmd, "router ospf6",
-	ROUTER_STR OSPF6_STR)
+DEFUNSH(VTYSH_OSPF6D, router_ospf6, router_ospf6_cmd,
+	"router ospf6 [(1-65535)]", ROUTER_STR OSPF6_STR OSPF6_INSTANCE_STR)
 {
 	vty->node = OSPF6_NODE;
 	return CMD_SUCCESS;
@@ -2693,7 +2704,7 @@ static int show_per_daemon(struct vty *vty, struct cmd_token **argv, int argc,
 	char *line = do_prepend(vty, argv, argc);
 
 	for (i = 0; i < array_size(vtysh_client); i++)
-		if (vtysh_client[i].fd >= 0 || vtysh_client[i].next) {
+		if (any_instance_connected(&vtysh_client[i])) {
 			vty_out(vty, headline, vtysh_client[i].name);
 			ret = vtysh_client_execute(&vtysh_client[i], line);
 			vty_out(vty, "\n");
@@ -3359,7 +3370,7 @@ DEFUN (vtysh_show_daemons,
 	unsigned int i;
 
 	for (i = 0; i < array_size(vtysh_client); i++)
-		if (vtysh_client[i].fd >= 0)
+		if (any_instance_connected(&vtysh_client[i]))
 			vty_out(vty, " %s", vtysh_client[i].name);
 	vty_out(vty, "\n");
 
@@ -3800,18 +3811,26 @@ static void vtysh_client_sorted_insert(struct vtysh_client *head_client,
 static void vtysh_update_all_instances(struct vtysh_client *head_client)
 {
 	struct vtysh_client *client;
+	struct vtysh_multi_instance_daemon *mid = NULL;
 	DIR *dir;
 	struct dirent *file;
 	int n = 0;
 
-	if (head_client->flag != VTYSH_OSPFD)
+	for (unsigned int i = 0; i < array_size(vtysh_multi_instance_daemon);
+	     i++) {
+		if (head_client->flag == vtysh_multi_instance_daemon[i].flag) {
+			mid = &vtysh_multi_instance_daemon[i];
+			break;
+		}
+	}
+	if (!mid)
 		return;
 
 	/* ls vty_sock_dir and look for all files ending in .vty */
 	dir = opendir(vtydir);
 	if (dir) {
 		while ((file = readdir(dir)) != NULL) {
-			if (frrstr_startswith(file->d_name, "ospfd-")
+			if (frrstr_startswith(file->d_name, mid->prefix)
 			    && ends_with(file->d_name, ".vty")) {
 				if (n == MAXIMUM_INSTANCES) {
 					fprintf(stderr,
@@ -3822,8 +3841,8 @@ static void vtysh_update_all_instances(struct vtysh_client *head_client)
 				client = (struct vtysh_client *)malloc(
 					sizeof(struct vtysh_client));
 				client->fd = -1;
-				client->name = "ospfd";
-				client->flag = VTYSH_OSPFD;
+				client->name = mid->name;
+				client->flag = mid->flag;
 				snprintf(client->path, sizeof(client->path),
 					 "%s/%s", vtydir, file->d_name);
 				client->next = NULL;
