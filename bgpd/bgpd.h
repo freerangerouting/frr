@@ -1028,6 +1028,8 @@ enum bgp_fsm_status {
 #define PEER_HOSTNAME(peer) ((peer)->host ? (peer)->host : "(unknown peer)")
 
 struct peer_connection {
+	struct peer *peer;
+
 	int fd;
 
 	/* Packet receive and send buffer. */
