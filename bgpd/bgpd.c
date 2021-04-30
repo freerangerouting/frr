@@ -1104,6 +1104,41 @@ bgp_peer_sort_t peer_sort_lookup(struct peer *peer)
 	return peer->sort;
 }
 
+/*
+ * Mutex will be freed in peer_connection_free
+ * this is a convenience function to reduce cut-n-paste
+ */
+void bgp_peer_connection_buffers_free(struct peer_connection *connection)
+{
+	frr_with_mutex (&connection->io_mtx) {
+		if (connection->ibuf) {
+			stream_fifo_free(connection->ibuf);
+			connection->ibuf = NULL;
+		}
+
+		if (connection->obuf) {
+			stream_fifo_free(connection->obuf);
+			connection->obuf = NULL;
+		}
+
+		if (connection->ibuf_work) {
+			ringbuf_del(connection->ibuf_work);
+			connection->ibuf_work = NULL;
+		}
+
+		if (connection->obuf_work) {
+			stream_free(connection->obuf_work);
+			connection->obuf_work = NULL;
+		}
+	}
+}
+
+static void bgp_peer_connection_free(struct peer_connection *connection)
+{
+	bgp_peer_connection_buffers_free(connection);
+	pthread_mutex_destroy(&connection->io_mtx);
+}
+
 static void peer_free(struct peer *peer)
 {
 	afi_t afi;
@@ -1123,7 +1158,7 @@ static void peer_free(struct peer *peer)
 	assert(!peer->t_read);
 	BGP_EVENT_FLUSH(peer);
 
-	pthread_mutex_destroy(&peer->connection.io_mtx);
+	bgp_peer_connection_free(&peer->connection);
 
 	/* Free connected nexthop, if present */
 	if (CHECK_FLAG(peer->flags, PEER_FLAG_CONFIG_NODE)
@@ -2484,26 +2519,6 @@ int peer_delete(struct peer *peer)
 	}
 
 	/* Buffers.  */
-	if (peer->connection.ibuf) {
-		stream_fifo_free(peer->connection.ibuf);
-		peer->connection.ibuf = NULL;
-	}
-
-	if (peer->connection.obuf) {
-		stream_fifo_free(peer->connection.obuf);
-		peer->connection.obuf = NULL;
-	}
-
-	if (peer->connection.ibuf_work) {
-		ringbuf_del(peer->connection.ibuf_work);
-		peer->connection.ibuf_work = NULL;
-	}
-
-	if (peer->connection.obuf_work) {
-		stream_free(peer->connection.obuf_work);
-		peer->connection.obuf_work = NULL;
-	}
-
 	if (peer->scratch) {
 		stream_free(peer->scratch);
 		peer->scratch = NULL;
