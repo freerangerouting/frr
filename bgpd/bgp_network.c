@@ -441,7 +441,7 @@ static int bgp_accept(struct thread *thread)
 		peer1 = peer_lookup_dynamic_neighbor(bgp, &su);
 		if (peer1) {
 			/* Dynamic neighbor has been created, let it proceed */
-			peer1->fd = bgp_sock;
+			peer1->connection.fd = bgp_sock;
 
 			/* Set the user configured MSS to TCP socket */
 			if (CHECK_FLAG(peer1->flags, PEER_FLAG_TCP_MSS))
@@ -571,7 +571,7 @@ static int bgp_accept(struct thread *thread)
 
 	peer->doppelganger = peer1;
 	peer1->doppelganger = peer;
-	peer->fd = bgp_sock;
+	peer->connection.fd = bgp_sock;
 	frr_with_privs(&bgpd_privs) {
 		vrf_bind(peer->bgp->vrf_id, bgp_sock, bgp_get_bound_name(peer));
 	}
@@ -688,13 +688,13 @@ static int bgp_update_source(struct peer *peer)
 		if (bgp_update_address(ifp, &peer->su, &addr))
 			return -1;
 
-		ret = sockunion_bind(peer->fd, &addr, 0, &addr);
+		ret = sockunion_bind(peer->connection.fd, &addr, 0, &addr);
 	}
 
 	/* Source is specified with IP address.  */
 	if (peer->update_source)
-		ret = sockunion_bind(peer->fd, peer->update_source, 0,
-				     peer->update_source);
+		ret = sockunion_bind(peer->connection.fd, peer->update_source,
+				     0, peer->update_source);
 
 	return ret;
 }
@@ -712,33 +712,33 @@ int bgp_connect(struct peer *peer)
 	}
 	frr_with_privs(&bgpd_privs) {
 	/* Make socket for the peer. */
-		peer->fd = vrf_sockunion_socket(&peer->su, peer->bgp->vrf_id,
-						bgp_get_bound_name(peer));
+	peer->connection.fd = vrf_sockunion_socket(&peer->su, peer->bgp->vrf_id,
+						   bgp_get_bound_name(peer));
 	}
-	if (peer->fd < 0)
+	if (peer->connection.fd < 0)
 		return -1;
 
-	set_nonblocking(peer->fd);
+	set_nonblocking(peer->connection.fd);
 
 	/* Set the user configured MSS to TCP socket */
 	if (CHECK_FLAG(peer->flags, PEER_FLAG_TCP_MSS))
-		sockopt_tcp_mss_set(peer->fd, peer->tcp_mss);
+		sockopt_tcp_mss_set(peer->connection.fd, peer->tcp_mss);
 
-	bgp_socket_set_buffer_size(peer->fd);
+	bgp_socket_set_buffer_size(peer->connection.fd);
 
-	if (bgp_set_socket_ttl(peer, peer->fd) < 0)
+	if (bgp_set_socket_ttl(peer, peer->connection.fd) < 0)
 		return -1;
 
-	sockopt_reuseaddr(peer->fd);
-	sockopt_reuseport(peer->fd);
+	sockopt_reuseaddr(peer->connection.fd);
+	sockopt_reuseport(peer->connection.fd);
 
 #ifdef IPTOS_PREC_INTERNETCONTROL
 	frr_with_privs(&bgpd_privs) {
 		if (sockunion_family(&peer->su) == AF_INET)
-			setsockopt_ipv4_tos(peer->fd,
+			setsockopt_ipv4_tos(peer->connection.fd,
 					    IPTOS_PREC_INTERNETCONTROL);
 		else if (sockunion_family(&peer->su) == AF_INET6)
-			setsockopt_ipv6_tclass(peer->fd,
+			setsockopt_ipv6_tclass(peer->connection.fd,
 					       IPTOS_PREC_INTERNETCONTROL);
 	}
 #endif
@@ -748,7 +748,7 @@ int bgp_connect(struct peer *peer)
 					     ? IPV4_MAX_PREFIXLEN
 					     : IPV6_MAX_PREFIXLEN;
 
-		bgp_md5_set_connect(peer->fd, &peer->su, prefixlen,
+		bgp_md5_set_connect(peer->connection.fd, &peer->su, prefixlen,
 				    peer->password);
 	}
 
@@ -764,11 +764,11 @@ int bgp_connect(struct peer *peer)
 
 	if (bgp_debug_neighbor_events(peer))
 		zlog_debug("%s [Event] Connect start to %s fd %d", peer->host,
-			   peer->host, peer->fd);
+			   peer->host, peer->connection.fd);
 
 	/* Connect to the remote peer. */
-	return sockunion_connect(peer->fd, &peer->su, htons(peer->port),
-				 ifindex);
+	return sockunion_connect(peer->connection.fd, &peer->su,
+				 htons(peer->port), ifindex);
 }
 
 /* After TCP connection is established.  Get local address and port. */
@@ -784,10 +784,10 @@ int bgp_getsockname(struct peer *peer)
 		peer->su_remote = NULL;
 	}
 
-	peer->su_local = sockunion_getsockname(peer->fd);
+	peer->su_local = sockunion_getsockname(peer->connection.fd);
 	if (!peer->su_local)
 		return -1;
-	peer->su_remote = sockunion_getpeername(peer->fd);
+	peer->su_remote = sockunion_getpeername(peer->connection.fd);
 	if (!peer->su_remote)
 		return -1;
 
