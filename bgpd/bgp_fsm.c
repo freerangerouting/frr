@@ -522,8 +522,8 @@ static int bgp_connect_timer(struct thread *thread)
 	if (peer->t_delayopen)
 		BGP_TIMER_OFF(peer->t_delayopen);
 
-	assert(!peer->t_write);
-	assert(!peer->t_read);
+	assert(!peer->connection.t_write);
+	assert(!peer->connection.t_read);
 
 	if (bgp_debug_neighbor_events(peer))
 		zlog_debug("%s [FSM] Timer (connect timer expire)", peer->host);
@@ -1503,8 +1503,8 @@ static int bgp_connect_check(struct thread *thread)
 	peer = THREAD_ARG(thread);
 	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_READS_ON));
 	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_WRITES_ON));
-	assert(!peer->t_read);
-	assert(!peer->t_write);
+	assert(!peer->connection.t_read);
+	assert(!peer->connection.t_write);
 
 	THREAD_OFF(peer->t_connect_check_r);
 	THREAD_OFF(peer->t_connect_check_w);
@@ -1725,8 +1725,8 @@ int bgp_start(struct peer *peer)
 		}
 	}
 
-	assert(!peer->t_write);
-	assert(!peer->t_read);
+	assert(!peer->connection.t_write);
+	assert(!peer->connection.t_read);
 	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_WRITES_ON));
 	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_READS_ON));
 	status = bgp_connect(peer);

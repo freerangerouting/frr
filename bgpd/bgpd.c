@@ -1182,8 +1182,8 @@ static void peer_free(struct peer *peer)
 	bgp_timer_set(peer);
 	bgp_reads_off(&peer->connection);
 	bgp_writes_off(&peer->connection);
-	assert(!peer->t_write);
-	assert(!peer->t_read);
+	assert(!peer->connection.t_write);
+	assert(!peer->connection.t_read);
 	BGP_EVENT_FLUSH(peer);
 
 	bgp_peer_connection_free(&peer->connection);
