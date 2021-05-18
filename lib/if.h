@@ -511,10 +511,11 @@ extern int if_cmp_name_func(const char *p1, const char *p2);
 extern void if_update_to_new_vrf(struct interface *, vrf_id_t vrf_id);
 
 /* Create new interface, adds to name list only */
-extern struct interface *if_create_name(const char *name, vrf_id_t vrf_id);
+extern struct interface *if_create_name(const char *name, const char *vrf_name);
 
 /* Create new interface, adds to index list only */
-extern struct interface *if_create_ifindex(ifindex_t ifindex, vrf_id_t vrf_id);
+extern struct interface *if_create_ifindex(ifindex_t ifindex,
+					   const char *vrf_name);
 extern struct interface *if_lookup_by_index(ifindex_t, vrf_id_t vrf_id);
 extern struct interface *if_vrf_lookup_by_index_next(ifindex_t ifindex,
 						     vrf_id_t vrf_id);
@@ -538,7 +539,8 @@ extern struct interface *if_get_by_ifindex(ifindex_t ifindex, vrf_id_t vrf_id);
 /* Sets the index and adds to index list */
 extern int if_set_index(struct interface *ifp, ifindex_t ifindex);
 /* Sets the name and adds to name list */
-extern void if_set_name(struct interface *ifp, const char *name);
+extern void if_set_name(struct interface *ifp, const char *name,
+			const char *vrf_name);
 
 /* Delete the interface, but do not free the structure, and leave it in the
    interface list.  It is often advisable to leave the pseudo interface
