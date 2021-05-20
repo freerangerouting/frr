@@ -95,6 +95,7 @@
 
 DEFINE_MTYPE_STATIC(BGPD, PEER_TX_SHUTDOWN_MSG, "Peer shutdown message (TX)");
 DEFINE_MTYPE_STATIC(BGPD, BGP_EVPN_INFO, "BGP EVPN instance information");
+DEFINE_MTYPE_STATIC(BGPD, BGP_IBUF_SCRATCH, "BGP EVPN instance information");
 DEFINE_QOBJ_TYPE(bgp_master);
 DEFINE_QOBJ_TYPE(bgp);
 DEFINE_QOBJ_TYPE(peer);
@@ -1176,6 +1177,8 @@ static void peer_free(struct peer *peer)
 
 	memset(peer, 0, sizeof(struct peer));
 
+	if (peer->ibuf_scratch)
+		XFREE(MTYPE_BGP_IBUF_SCRATCH, peer->ibuf_scratch);
 	XFREE(MTYPE_BGP_PEER, peer);
 }
 
@@ -1400,10 +1403,16 @@ struct peer *peer_new(struct bgp *bgp)
 		stream_new(BGP_MAX_PACKET_SIZE + BGP_MAX_PACKET_SIZE_OVERFLOW);
 	peer->rpkt_quanta =
 		atomic_load_explicit(&bgp->rpkt_quanta, memory_order_relaxed);
-	peer->ibuf_work = ringbuf_new(BGP_MAX_PACKET_SIZE * peer->rpkt_quanta);
 
 	peer->scratch = stream_new(BGP_MAX_PACKET_SIZE);
+	if (peer->rpkt_quanta) {
+		peer->ibuf_work = ringbuf_new(BGP_MAX_PACKET_SIZE * peer->rpkt_quanta);
 
+		peer->ibuf_scratch =
+			XCALLOC(MTYPE_BGP_IBUF_SCRATCH,
+				BGP_EXTENDED_MESSAGE_MAX_PACKET_SIZE
+				* peer->rpkt_quanta);
+	}
 	bgp_sync_init(peer);
 
 	/* Get service port number.  */
