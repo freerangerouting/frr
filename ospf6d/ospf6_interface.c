@@ -1229,11 +1229,10 @@ static int ospf6_interface_show(struct vty *vty, struct interface *ifp,
 				oi->at_cfg.tx_drop, oi->at_cfg.rx_drop);
 		}
 	} else {
-		if (use_json) {
+		if (use_json)
 			json_object_string_add(json_auth, "authType", "NULL");
-		} else {
+		else
 			vty_out(vty, "  Authentication Trailer is disabled\n");
-		}
 	}
 
 	if (use_json)
