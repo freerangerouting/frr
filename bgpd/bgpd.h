@@ -1045,6 +1045,11 @@ struct peer_connection {
 
 	struct thread *t_read;
 	struct thread *t_write;
+
+	/* Thread flags */
+	_Atomic uint32_t thread_flags;
+#define PEER_THREAD_WRITES_ON     (1U << 0)
+#define PEER_THREAD_READS_ON      (1U << 1)
 };
 extern void
 bgp_peer_connection_buffers_free(struct peer_connection *connection);
@@ -1424,10 +1429,8 @@ struct peer {
 
 	/* Thread flags. */
 	_Atomic uint32_t thread_flags;
-#define PEER_THREAD_WRITES_ON         (1U << 0)
-#define PEER_THREAD_READS_ON          (1U << 1)
-#define PEER_THREAD_KEEPALIVES_ON     (1U << 2)
-#define PEER_THREAD_SUBGRP_ADV_DELAY  (1U << 3)
+#define PEER_THREAD_KEEPALIVES_ON     (1U << 0)
+#define PEER_THREAD_SUBGRP_ADV_DELAY  (1U << 1)
 
 	/* workqueues */
 	struct work_queue *clear_node_queue;

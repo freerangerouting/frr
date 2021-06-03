@@ -2452,8 +2452,10 @@ int peer_delete(struct peer *peer)
 	bgp_keepalives_off(peer);
 	bgp_reads_off(&peer->connection);
 	bgp_writes_off(&peer->connection);
-	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_WRITES_ON));
-	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_READS_ON));
+	assert(!CHECK_FLAG(peer->connection.thread_flags,
+			   PEER_THREAD_WRITES_ON));
+	assert(!CHECK_FLAG(peer->connection.thread_flags,
+			   PEER_THREAD_READS_ON));
 	assert(!CHECK_FLAG(peer->thread_flags, PEER_THREAD_KEEPALIVES_ON));
 
 	if (CHECK_FLAG(peer->sflags, PEER_STATUS_NSF_WAIT))
