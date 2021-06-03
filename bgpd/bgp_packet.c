@@ -1019,13 +1019,14 @@ static int bgp_collision_detect(struct peer *new, struct in_addr remote_id)
 	 * states. Note that a peer GR is handled by closing the existing
 	 * connection upon receipt of new one.
 	 */
-	if (peer_established(peer) || peer->status == Clearing) {
+	if (peer_established(peer) || peer->connection.status == Clearing) {
 		bgp_notify_send(new, BGP_NOTIFY_CEASE,
 				BGP_NOTIFY_CEASE_COLLISION_RESOLUTION);
 		return -1;
 	}
 
-	if ((peer->status != OpenConfirm) && (peer->status != OpenSent))
+	if ((peer->connection.status != OpenConfirm)
+	    && (peer->connection.status != OpenSent))
 		return 0;
 
 	/*
@@ -1106,7 +1107,7 @@ static int bgp_collision_detect(struct peer *new, struct in_addr remote_id)
  * Side effects
  * ------------
  * - May send NOTIFY messages
- * - May not modify peer->status
+ * - May not modify peer->connection.status
  * - May not call bgp_event_update()
  */
 
@@ -1546,9 +1547,10 @@ static int bgp_update_receive(struct peer *peer, bgp_size_t size)
 		flog_err(EC_BGP_INVALID_STATUS,
 			 "%s [FSM] Update packet received under status %s",
 			 peer->host,
-			 lookup_msg(bgp_status_msg, peer->status, NULL));
+			 lookup_msg(bgp_status_msg, peer->connection.status,
+				    NULL));
 		bgp_notify_send(peer, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(peer->status));
+				bgp_fsm_error_subcode(peer->connection.status));
 		return BGP_Stop;
 	}
 
@@ -1960,9 +1962,10 @@ static int bgp_route_refresh_receive(struct peer *peer, bgp_size_t size)
 			EC_BGP_INVALID_STATUS,
 			"%s [Error] Route refresh packet received under status %s",
 			peer->host,
-			lookup_msg(bgp_status_msg, peer->status, NULL));
+			lookup_msg(bgp_status_msg, peer->connection.status,
+				   NULL));
 		bgp_notify_send(peer, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(peer->status));
+				bgp_fsm_error_subcode(peer->connection.status));
 		return BGP_Stop;
 	}
 
@@ -2495,9 +2498,10 @@ int bgp_capability_receive(struct peer *peer, bgp_size_t size)
 			EC_BGP_NO_CAP,
 			"%s [Error] Dynamic capability packet received under status %s",
 			peer->host,
-			lookup_msg(bgp_status_msg, peer->status, NULL));
+			lookup_msg(bgp_status_msg, peer->connection.status,
+				   NULL));
 		bgp_notify_send(peer, BGP_NOTIFY_FSM_ERR,
-				bgp_fsm_error_subcode(peer->status));
+				bgp_fsm_error_subcode(peer->connection.status));
 		return BGP_Stop;
 	}
 
@@ -2535,7 +2539,8 @@ int bgp_process_packet(struct thread *thread)
 	fsm_update_result = 0;
 
 	/* Guard against scheduled events that occur after peer deletion. */
-	if (peer->status == Deleted || peer->status == Clearing)
+	if (peer->connection.status == Deleted
+	    || peer->connection.status == Clearing)
 		return 0;
 
 	unsigned int processed = 0;
