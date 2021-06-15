@@ -422,6 +422,107 @@ def find_rp_details(tgen, topo):
     return rp_details
 
 
+def create_default_and_attached_pim_config(tgen, topo, input_dict=None, build=False):
+    """
+    API to configure backplan_interfaces, default-forwarding,
+    and attached netwroks on routers
+
+    Parameters
+    ----------
+    * `tgen` : Topogen object
+    * `topo` : json file data
+    * `input_dict` : Input dict data, required when configuring from
+                     testcase
+    * `build` : Only for initial setup phase this is set as True.
+
+    Usage
+    -----
+    1- For adding attached network
+    input_dict ={
+        "r1": {
+                "pim": {
+                    "backplan_interfaces": intf_r1_i1,
+                    "default-forwarding": {
+                            intf_r1_i2:{
+                             "attached_networks": ["100.1.1.1/24","100.1.2.1/24","100.1.3.1/2]
+                            }
+                    }
+                }
+       }
+    }
+
+    2- For deleting attached netwrok
+    input_dict ={
+        "r1": {
+                "pim": {
+                    "backplan_interfaces": intf_r1_i1,
+                    "default-forwarding": {
+                            intf_r1_i2:{
+                             "attached_networks": ["100.1.1.1/24"],
+                             "delete":True
+                            }
+                    }
+                }
+       }
+    }
+    Returns
+    -------
+    True or False
+    """
+    logger.debug("Entering lib API: create_default_and_attached_pim_config()")
+    result = False
+    if not input_dict:
+        input_dict = deepcopy(topo)
+    else:
+        topo = topo["routers"]
+        input_dict = deepcopy(input_dict)
+    config_data = []
+
+    for router in input_dict.keys():
+        if "pim" not in input_dict[router]:
+            logger.debug("Router %s: 'pim' is not present in "
+                         "input_dict", router)
+            continue
+
+        pim_data = input_dict[router]["pim"]
+
+        if "backplan_interfaces" in pim_data:
+            intf_data = pim_data["backplan_interfaces"]
+            cmd = "ip multicast default-forwarding %s" %intf_data
+            config_data.append(cmd)
+
+        if "default-forwarding" in pim_data:
+            for intf_name, intf_data in pim_data["default-forwarding"].items():
+                config_data.append("interface {}".format(intf_name))
+                cmd = "ip pim enable-default-forwarding"
+                del_attr = intf_data.setdefault("delete_attr", False)
+                config_data.append(cmd)
+                if del_attr:
+                    cmd = "no {}".format(cmd)
+                    config_data.append(cmd)
+
+                if  "attached_networks" in intf_data:
+                    del_action = intf_data.setdefault("delete", False)
+                    for attach_network in intf_data["attached_networks"]:
+                        cmd = "ip pim attach-network {}".format(attach_network)
+                        config_data.append(cmd)
+                        if del_action:
+                            cmd = "no {}".format(cmd)
+                            config_data.append(cmd)
+        try:
+
+            result = create_common_configuration(tgen, router, config_data,
+                                             "interface_config",
+                                             build=build)
+        except  InvalidCLIError:
+            errormsg = traceback.format_exc()
+            logger.error(errormsg)
+            return errormsg
+
+    logger.debug("Exiting lib API: create_default_and_attached_pim_config()")
+    return result
+
+
 def configure_pim_force_expire(tgen, topo, input_dict, build=False):
     """
     Helper API to create pim configuration.
@@ -618,7 +719,7 @@ def verify_pim_neighbors(tgen, topo, dut=None, iface=None, nbr_ip=None):
     return True
 
 
-@retry(attempts=21, wait=2, return_is_str=True)
+@retry(attempts=31, wait=2, return_is_str=True)
 def verify_igmp_groups(tgen, dut, interface, group_addresses):
     """
     Verify IGMP groups are received from an intended interface
@@ -1552,6 +1653,17 @@ def verify_pim_interface(tgen, topo, dut, interface=None, interface_ip=None):
 
                     if pim_interface in show_ip_pim_interface_json:
                         pim_intf_json = show_ip_pim_interface_json[pim_interface]
+                    else:
+                        errormsg = (
+                            "[DUT %s]: PIM interface: %s "
+                            "PIM interface ip: %s, not Found"
+                            % (
+                                dut,
+                                pim_interface,
+                                pim_intf_ip
+                            )
+                        )
+                        return errormsg
 
                     # Verifying PIM interface
                     if (
@@ -3417,6 +3529,72 @@ def verify_igmp_interface(tgen, topo, dut, igmp_iface, interface_ip):
                 % (dut, igmp_iface, interface_ip)
             )
             return errormsg
+
+    logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
+    return True
+
+
+@retry(attempts=31, wait=2, return_is_str=True)
+def verify_local_igmp_groups(tgen, dut, interface, group_addresses):
+    """
+    Verify local IGMP groups are received from an intended interface
+    by running "show ip igmp join json" command
+
+    Parameters
+    ----------
+    * `tgen`: topogen object
+    * `dut`: device under test
+    * `interface`: interface, from which IGMP groups are configured
+    * `group_addresses`: IGMP group address
+
+    Usage
+    -----
+    dut = "r1"
+    interface = "r1-r0-eth0"
+    group_address = "225.1.1.1"
+    result = verify_local_igmp_groups(tgen, dut, interface, group_address)
+
+    Returns
+    -------
+    errormsg(str) or True
+    """
+
+    logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
+
+    if dut not in tgen.routers():
+        return False
+
+    rnode = tgen.routers()[dut]
+
+    logger.info("[DUT: %s]: Verifying local IGMP groups received:", dut)
+    show_ip_local_igmp_json = run_frr_cmd(rnode, "show ip igmp join json",
+                                    isjson=True)
+
+    if type(group_addresses) is not list:
+        group_addresses = [group_addresses]
+
+    if interface not in show_ip_local_igmp_json :
+
+        errormsg = ("[DUT %s]: Verifying local IGMP group received"
+                    " from interface %s [FAILED]!! "
+                    % (dut, interface))
+        return errormsg
+
+    for grp_addr in group_addresses:
+        found = False
+        for index in show_ip_local_igmp_json[interface]["groups"]:
+            if index['group'] == grp_addr:
+                found = True
+                break
+        if not found:
+            errormsg = ("[DUT %s]: Verifying local IGMP group received"
+                        " from interface %s [FAILED]!! "
+                        " Expected: %s " % (dut, interface, grp_addr))
+            return errormsg
+
+        logger.info("[DUT %s]: Verifying local IGMP group %s received "
+                    "from interface %s [PASSED]!! ",
+                    dut, grp_addr, interface)
 
     logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
     return True

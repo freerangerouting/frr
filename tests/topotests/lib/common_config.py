@@ -4487,3 +4487,123 @@ def verify_ip_nht(tgen, input_dict):
 
     logger.debug("Exiting lib API: verify_ip_nht()")
     return False
+
+
+def kernel_requires_l3mdev_adjustment():
+    """
+    Checks if the L3 master device needs to be adjusted to handle VRF traffic
+    based on kernel version.
+
+    Returns
+    -------
+    1 or 0
+    """
+
+    if version_cmp(platform.release(), "4.15") >= 0:
+        return 1
+    return 0
+
+
+def adjust_router_l3mdev(tgen, router):
+    """
+    Adjusts a routers L3 master device to handle VRF traffic depending on kernel
+    version.
+
+    Parameters
+    ----------
+    * `tgen`   : tgen object
+    * `router` : router id to be configured.
+
+    Returns
+    -------
+    True
+    """
+
+    l3mdev_accept = kernel_requires_l3mdev_adjustment()
+
+    logger.info(
+        "router {0}: setting net.ipv4.tcp_l3mdev_accept={1}".format(
+            router, l3mdev_accept
+        )
+    )
+
+    output = tgen.net[router].cmd("sysctl -n net.ipv4.tcp_l3mdev_accept")
+    logger.info("router {0}: existing tcp_l3mdev_accept was {1}".format(router, output))
+
+    tgen.net[router].cmd(
+        "sysctl -w net.ipv4.tcp_l3mdev_accept={}".format(l3mdev_accept)
+    )
+
+
+def iperf_send_attached_traffic(tgen, client, bindToAddress, ttl,
+                     time=0, l4Type='UDP', mappedAddress=None, port=None):
+    """
+    Run iperf to send IGMP join and traffic
+
+    Parameters:
+    -----------
+    * `tgen`  : Topogen object
+    * `l4Type`: string, one of [ TCP, UDP ]
+    * `client`: iperf client, from where iperf traffic would be sent
+    * `bindToAddress`: bind to <host>, an interface or multicast
+                       address
+    * `ttl`: time to live
+    * `time`: time in seconds to transmit for
+    * `inc_step`: increamental steps, by default 0
+    * `repeat`: Repetition of group, by default 0
+    * `mappedAddress`: Mapped Interface ip address
+    * `port`: Start value of UDP port number
+
+
+    returns:
+    --------
+    errormsg or True
+    """
+
+    logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
+
+    rnode = tgen.routers()[client]
+
+    # Group address range to cover
+    if type(bindToAddress) is not list:
+        bindToAddress = [bindToAddress]
+    for bindTo in bindToAddress:
+        # Mapped Interface IP
+        if mappedAddress:
+            iperfArgs = 'iperf -B %s -c %s'  % (mappedAddress , bindTo)
+        # UDP/TCP
+        if l4Type == 'UDP':
+            iperfArgs += ' -b 0.012m '
+
+        if port:
+            iperfArgs += ' -u -p %s' %port
+            port += 1
+
+        # TTL
+        if ttl:
+            iperfArgs += ' -T %d ' %ttl
+
+        # Time
+        if time:
+            iperfArgs += ' -t %d ' %time
+
+        iperfArgs += ' &>/dev/null &'
+
+        # Run iperf command to send multicast traffic
+        logger.debug("[DUT: {}]: Running command: [{}]".
+                     format(client, iperfArgs))
+        output = rnode.run("set +m; {} sleep 0.5".format(iperfArgs))
+
+        # Check if iperf process is running
+        if output:
+            pid = output.split()[1]
+            rnode.run("touch /var/run/frr/iperf_client.pid")
+            rnode.run("echo %s >> /var/run/frr/iperf_client.pid" % pid)
+        else:
+            errormsg = "Multicast traffic is not sent for {}. Error {}". \
+                format(bindTo, output)
+            logger.error(output)
+            return errormsg
+
+    logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
+    return True
