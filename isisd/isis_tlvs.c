@@ -674,7 +674,7 @@ static int unpack_item_ext_subtlvs(uint16_t mtid, uint8_t len, struct stream *s,
 			}
 			break;
 		case ISIS_SUBTLV_MM_DELAY:
-			if (subtlv_len != ISIS_SUBTLV_DEF_SIZE) {
+			if (subtlv_len != ISIS_SUBTLV_MM_DELAY_SIZE) {
 				sbuf_push(log, indent,
 					  "TLV size does not match expected size for Min/Max Link Delay!\n");
 			} else {
