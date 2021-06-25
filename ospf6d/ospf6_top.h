@@ -60,6 +60,43 @@ struct ospf6_redist {
 #define ROUTEMAP(R) (R->route_map.map)
 };
 
+struct ospf6_gr_helper {
+	/* Gracefull restart Helper supported configs*/
+	/* Supported grace interval*/
+	uint32_t supported_grace_time;
+
+	/* Helper support
+	 * Supported : True
+	 * Not Supported : False.
+	 */
+	bool isHelperSupported;
+
+	/* Support for strict LSA check.
+	 * if it is set,Helper aborted
+	 * upon a TOPO change.
+	 */
+	bool strictLsaCheck;
+
+	/* Support as HELPER only for
+	 * planned restarts.
+	 */
+	bool onlyPlannedRestart;
+
+	/* This list contains the advertisement
+	 * routerids for which Helper support is
+	 * enabled.
+	 */
+	struct hash *enableRtrList;
+
+	/* HELPER for number of active
+	 * RESTARTERs.
+	 */
+	int activeRestarterCnt;
+
+	/* last HELPER exit reason */
+	uint32_t lastExitReason;
+};
+
 /* OSPFv3 top level data structure */
 struct ospf6 {
 	/* The relevant vrf_id */
@@ -152,6 +189,10 @@ struct ospf6 {
 	 * to support ECMP.
 	 */
 	uint16_t max_multipath;
+
+	/*ospf6 Graceful restart helper info */
+	struct ospf6_gr_helper ospf6_helper_cfg;
+
 	/* Count of NSSA areas */
 	uint8_t anyNSSA;
 	struct thread *t_abr_task; /* ABR task timer. */
