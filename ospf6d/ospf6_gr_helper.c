@@ -55,6 +55,8 @@
 
 DEFINE_MTYPE(OSPF6D, OSPF6_GR_HELPER, "OSPF6 Graceful restart helper");
 
+unsigned char conf_debug_ospf6_gr = 0;
+
 const char *ospf6_exit_reason_desc[] = {
 	"Unknown reason",     "Helper inprogress",	   "Topology Change",
 	"Grace timer expiry", "Successful graceful restart",
@@ -117,6 +119,23 @@ static void ospf6_enable_rtr_hash_destroy(struct ospf6 *ospf6)
 	ospf6->ospf6_helper_cfg.enableRtrList = NULL;
 }
 
+/* Debug commands */
+DEFPY(debug_ospf6_gr,
+      debug_ospf6_gr_cmd,
+      "[no$no] debug ospf6 gr helper",
+      NO_STR
+      DEBUG_STR OSPF6_STR
+      "Graceful restart\n"
+      "Helper Information\n")
+{
+	if (!no)
+		OSPF6_DEBUG_GR_HELPER_ON();
+	else
+		OSPF6_DEBUG_GR_HELPER_OFF();
+
+	return CMD_SUCCESS;
+}
+
 /*
  * Initilise GR helper config datastructer.
  *
@@ -128,6 +147,9 @@ static void ospf6_enable_rtr_hash_destroy(struct ospf6 *ospf6)
  */
 void ospf6_gr_helper_init(struct ospf6 *ospf6)
 {
+	if (IS_DEBUG_OSPF6_GR_HELPER)
+		zlog_debug("%s, GR Helper init.", __PRETTY_FUNCTION__);
+
 	ospf6->ospf6_helper_cfg.isHelperSupported = OSPF6_FALSE;
 	ospf6->ospf6_helper_cfg.strictLsaCheck = OSPF6_TRUE;
 	ospf6->ospf6_helper_cfg.onlyPlannedRestart = OSPF6_FALSE;
@@ -151,5 +173,9 @@ void ospf6_gr_helper_init(struct ospf6 *ospf6)
  */
 void ospf6_gr_helper_deinit(struct ospf6 *ospf6)
 {
+
+	if (IS_DEBUG_OSPF6_GR_HELPER)
+		zlog_debug("%s, GR helper deinit.", __PRETTY_FUNCTION__);
+
 	ospf6_enable_rtr_hash_destroy(ospf6);
 }
