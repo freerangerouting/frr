@@ -29,6 +29,7 @@ from lib.topolog import logger
 # Import common_config to use commomnly used APIs
 from lib.common_config import (
     create_common_configuration,
+    create_common_configurations,
     InvalidCLIError,
     retry,
     run_frr_cmd,
@@ -79,28 +80,38 @@ def create_pim_config(tgen, topo, input_dict=None, build=False, load_config=True
     else:
         topo = topo["routers"]
         input_dict = deepcopy(input_dict)
+
+    config_data_dict = {}
+
     for router in input_dict.keys():
-        result = _enable_disable_pim(tgen, topo, input_dict, router, build)
+        config_data = _enable_disable_pim_config(tgen, topo, input_dict, router, build)
 
+        if config_data:
+            config_data_dict[router] = config_data
+
+    # Now add RP config to all routers
+    for router in input_dict.keys():
         if "pim" not in input_dict[router]:
-            logger.debug("Router %s: 'pim' is not present in " "input_dict", router)
             continue
+        if "rp" not in input_dict[router]["pim"]:
+            continue
+        _add_pim_config(
+            tgen, topo, input_dict, router, build, config_data_dict
+        )
 
-        if result is True:
-            if "rp" not in input_dict[router]["pim"]:
-                continue
-
-            result = _create_pim_config(
-                tgen, topo, input_dict, router, build, load_config
-            )
-            if result is not True:
-                return False
+    try:
+        result = create_common_configurations(
+            tgen, config_data_dict, "pim", build, load_config
+        )
+    except InvalidCLIError:
+        logger.error("create_pim_config", exc_info=True)
+        result = False
 
     logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
     return result
 
 
-def _create_pim_config(tgen, topo, input_dict, router, build=False, load_config=False):
+def _add_pim_config(tgen, topo, input_dict, router, build, config_data_dict):
     """
     Helper API to create pim configuration.
 
@@ -111,15 +122,14 @@ def _create_pim_config(tgen, topo, input_dict, router, build=False, load_config=
     * `input_dict` : Input dict data, required when configuring from testcase
     * `router` : router id to be configured.
     * `build` : Only for initial setup phase this is set as True.
-
+    * `config_data_dict` : OUT: adds `router` config to dictinary
     Returns
     -------
-    True or False
+    None
     """
 
-    result = False
-    logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
-    try:
+    if True: # avoid large diff for now
+        logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
 
         pim_data = input_dict[router]["pim"]
 
@@ -127,12 +137,12 @@ def _create_pim_config(tgen, topo, input_dict, router, build=False, load_config=
             if "pim" not in input_dict[router]:
                 continue
 
+            config_data = []
             for destLink, data in topo[dut]["links"].items():
                 if "pim" not in data:
                     continue
 
                 if "rp" in pim_data:
-                    config_data = []
                     rp_data = pim_data["rp"]
 
                 for rp_dict in deepcopy(rp_data):
@@ -197,21 +207,11 @@ def _create_pim_config(tgen, topo, input_dict, router, build=False, load_config=
                             if del_action:
                                 cmd = "no {}".format(cmd)
                                 config_data.append(cmd)
-
-            result = create_common_configuration(
-                tgen, dut, config_data, "pim", build, load_config
-            )
-            if result is not True:
-                return False
-
-    except InvalidCLIError:
-        # Traceback
-        errormsg = traceback.format_exc()
-        logger.error(errormsg)
-        return errormsg
-
-    logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
-    return result
+            if config_data:
+                if dut not in config_data_dict:
+                    config_data_dict[dut] = config_data
+                else:
+                    config_data_dict[dut].extend(config_data)
 
 
 def create_igmp_config(tgen, topo, input_dict=None, build=False):
@@ -258,6 +258,9 @@ def create_igmp_config(tgen, topo, input_dict=None, build=False):
     else:
         topo = topo["routers"]
         input_dict = deepcopy(input_dict)
+
+    config_data_dict = {}
+
     for router in input_dict.keys():
         if "igmp" not in input_dict[router]:
             logger.debug("Router %s: 'igmp' is not present in " "input_dict", router)
@@ -303,21 +306,22 @@ def create_igmp_config(tgen, topo, input_dict=None, build=False):
                                     cmd = "no {}".format(cmd)
 
                             config_data.append(cmd)
-        try:
+        if config_data:
+            config_data_dict[router] = config_data
 
-            result = create_common_configuration(
-                tgen, router, config_data, "interface_config", build=build
-            )
-        except InvalidCLIError:
-            errormsg = traceback.format_exc()
-            logger.error(errormsg)
-            return errormsg
+    try:
+        result = create_common_configurations(
+            tgen, config_data_dict, "interface_config", build=build
+        )
+    except InvalidCLIError:
+        logger.error("create_igmp_config", exc_info=True)
+        result = False
 
     logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
     return result
 
 
-def _enable_disable_pim(tgen, topo, input_dict, router, build=False):
+def _enable_disable_pim_config(tgen, topo, input_dict, router, build=False):
     """
     Helper API to enable or disable pim on interfaces
 
@@ -331,57 +335,41 @@ def _enable_disable_pim(tgen, topo, input_dict, router, build=False):
 
     Returns
     -------
-    True or False
+    list of config
     """
-    result = False
-    logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
-    try:
-        config_data = []
+    config_data = []
 
-        enable_flag = True
-        # Disable pim on interface
-        if "pim" in input_dict[router]:
-            if "disable" in input_dict[router]["pim"]:
-                enable_flag = False
-                interfaces = input_dict[router]["pim"]["disable"]
+    enable_flag = True
+    # Disable pim on interface
+    if "pim" in input_dict[router]:
+        if "disable" in input_dict[router]["pim"]:
+            enable_flag = False
+            interfaces = input_dict[router]["pim"]["disable"]
 
-                if type(interfaces) is not list:
-                    interfaces = [interfaces]
+            if type(interfaces) is not list:
+                interfaces = [interfaces]
 
-                for interface in interfaces:
-                    cmd = "interface {}".format(interface)
-                    config_data.append(cmd)
-                    config_data.append("no ip pim")
+            for interface in interfaces:
+                cmd = "interface {}".format(interface)
+                config_data.append(cmd)
+                config_data.append("no ip pim")
 
-        # Enable pim on interface
-        if enable_flag:
-            for destRouterLink, data in sorted(topo[router]["links"].items()):
-                if "pim" in data and data["pim"] == "enable":
+    # Enable pim on interface
+    if enable_flag:
+        for destRouterLink, data in sorted(topo[router]["links"].items()):
+            if "pim" in data and data["pim"] == "enable":
 
-                    # Loopback interfaces
-                    if "type" in data and data["type"] == "loopback":
-                        interface_name = destRouterLink
-                    else:
-                        interface_name = data["interface"]
+                # Loopback interfaces
+                if "type" in data and data["type"] == "loopback":
+                    interface_name = destRouterLink
+                else:
+                    interface_name = data["interface"]
 
-                    cmd = "interface {}".format(interface_name)
-                    config_data.append(cmd)
-                    config_data.append("ip pim")
+                cmd = "interface {}".format(interface_name)
+                config_data.append(cmd)
+                config_data.append("ip pim")
 
-        result = create_common_configuration(
-            tgen, router, config_data, "interface_config", build=build
-        )
-        if result is not True:
-            return False
-
-    except InvalidCLIError:
-        # Traceback
-        errormsg = traceback.format_exc()
-        logger.error(errormsg)
-        return errormsg
-
-    logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
-    return result
+    return config_data
 
 
 def find_rp_details(tgen, topo):
@@ -454,7 +442,9 @@ def configure_pim_force_expire(tgen, topo, input_dict, build=False):
 
     result = False
     logger.debug("Entering lib API: {}".format(sys._getframe().f_code.co_name))
+
     try:
+        config_data_dict = {}
 
         for dut in input_dict.keys():
             if "pim" not in input_dict[dut]:
@@ -462,8 +452,8 @@ def configure_pim_force_expire(tgen, topo, input_dict, build=False):
 
             pim_data = input_dict[dut]["pim"]
 
+            config_data = []
             if "force_expire" in pim_data:
-                config_data = []
                 force_expire_data = pim_data["force_expire"]
 
                 for source, groups in force_expire_data.items():
@@ -476,17 +466,15 @@ def configure_pim_force_expire(tgen, topo, input_dict, build=False):
                         )
                         config_data.append(cmd)
 
-                    result = create_common_configuration(
-                        tgen, dut, config_data, "pim", build=build
-                    )
-                    if result is not True:
-                        return False
+            if config_data:
+                config_data_dict[dut] = config_data
 
+        result = create_common_configurations(
+            tgen, config_data_dict, "pim", build=build
+        )
     except InvalidCLIError:
-        # Traceback
-        errormsg = traceback.format_exc()
-        logger.error(errormsg)
-        return errormsg
+        logger.error("configure_pim_force_expire", exc_info=True)
+        result = False
 
     logger.debug("Exiting lib API: {}".format(sys._getframe().f_code.co_name))
     return result
@@ -966,7 +954,7 @@ def verify_join_state_and_timer(tgen, dut, iif, src_address, group_addresses, ex
     return True
 
 
-@retry(retry_timeout=80)
+@retry(retry_timeout=120)
 def verify_ip_mroutes(
     tgen, dut, src_address, group_addresses, iif, oil, return_uptime=False, mwait=0, expected=True
 ):
@@ -2029,6 +2017,7 @@ def add_rp_interfaces_and_pim_config(tgen, topo, interface, rp, rp_mapping):
                 config_data.append("ip address {}".format(_rp))
                 config_data.append("ip pim")
 
+            # Why not config just once, why per group?
             result = create_common_configuration(
                 tgen, rp, config_data, "interface_config"
             )

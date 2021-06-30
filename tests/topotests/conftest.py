@@ -226,11 +226,11 @@ def pytest_runtest_makereport(item, call):
         modname = parent.module.__name__
 
         # Treat skips as non errors, don't pause after
-        if call.excinfo.typename != "AssertionError":
+        if call.excinfo.typename == "Skipped":
             pause = False
             error = False
             logger.info(
-                'assert skipped at "{}/{}": {}'.format(
+                'test skipped at "{}/{}": {}'.format(
                     modname, item.name, call.excinfo.value
                 )
             )
@@ -239,7 +239,7 @@ def pytest_runtest_makereport(item, call):
             # Handle assert failures
             parent._previousfailed = item  # pylint: disable=W0212
             logger.error(
-                'assert failed at "{}/{}": {}'.format(
+                'test failed at "{}/{}": {}'.format(
                     modname, item.name, call.excinfo.value
                 )
             )

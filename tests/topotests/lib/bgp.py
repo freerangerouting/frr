@@ -33,7 +33,7 @@ from lib.topotest import frr_unicode
 
 # Import common_config to use commomnly used APIs
 from lib.common_config import (
-    create_common_configuration,
+    create_common_configurations,
     InvalidCLIError,
     load_config_to_router,
     check_address_types,
@@ -147,6 +147,8 @@ def create_router_bgp(tgen, topo, input_dict=None, build=False, load_config=True
         topo = topo["routers"]
         input_dict = deepcopy(input_dict)
 
+    config_data_dict = {}
+
     for router in input_dict.keys():
         if "bgp" not in input_dict[router]:
             logger.debug("Router %s: 'bgp' not present in input_dict", router)
@@ -156,6 +158,8 @@ def create_router_bgp(tgen, topo, input_dict=None, build=False, load_config=True
 
         if type(bgp_data_list) is not list:
             bgp_data_list = [bgp_data_list]
+
+        config_data = []
 
         for bgp_data in bgp_data_list:
             data_all_bgp = __create_bgp_global(tgen, bgp_data, router, build)
@@ -197,16 +201,19 @@ def create_router_bgp(tgen, topo, input_dict=None, build=False, load_config=True
                         data_all_bgp = __create_l2vpn_evpn_address_family(
                             tgen, topo, bgp_data, router, config_data=data_all_bgp
                         )
+            if data_all_bgp:
+                config_data.extend(data_all_bgp)
 
-            try:
-                result = create_common_configuration(
-                    tgen, router, data_all_bgp, "bgp", build, load_config
-                )
-            except InvalidCLIError:
-                # Traceback
-                errormsg = traceback.format_exc()
-                logger.error(errormsg)
-                return errormsg
+        if config_data:
+            config_data_dict[router] = config_data
+
+    try:
+        result = create_common_configurations(
+            tgen, config_data_dict, "bgp", build, load_config
+        )
+    except InvalidCLIError:
+        logger.error("create_router_bgp", exc_info=True)
+        result = False
 
     logger.debug("Exiting lib API: create_router_bgp()")
     return result
@@ -225,7 +232,7 @@ def __create_bgp_global(tgen, input_dict, router, build=False):
 
     Returns
     -------
-    True or False
+    list of config commands
     """
 
     result = False
@@ -240,7 +247,7 @@ def __create_bgp_global(tgen, input_dict, router, build=False):
         logger.debug(
             "Router %s: 'local_as' not present in input_dict" "for BGP", router
         )
-        return False
+        return config_data
 
     local_as = bgp_data.setdefault("local_as", "")
     cmd = "router bgp {}".format(local_as)
