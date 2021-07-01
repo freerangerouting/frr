@@ -272,6 +272,22 @@ void ospf6_install_lsa(struct ospf6_lsa *lsa)
 
 	/* actually install */
 	lsa->installed = now;
+
+	/* Topo change handling */
+	if (CHECK_LSA_TOPO_CHG_ELIGIBLE(ntohs(lsa->header->type))) {
+
+		/* check if it is new lsa ? or existing lsa got modified ?*/
+		if (!old || (old && OSPF6_LSA_IS_CHANGED(old, lsa))) {
+			struct ospf6 *ospf6;
+
+			ospf6 = ospf6_get_by_lsdb(lsa);
+
+			assert(ospf6);
+
+			ospf6_helper_handle_topo_chg(ospf6, lsa);
+		}
+	}
+
 	ospf6_lsdb_add(lsa, lsa->lsdb);
 
 	if (ntohs(lsa->header->type) == OSPF6_LSTYPE_TYPE_7) {
@@ -973,19 +989,39 @@ void ospf6_receive_lsa(struct ospf6_neighbor *from,
 
 			assert(ospf6);
 
-			if (IS_DEBUG_OSPF6_GR_HELPER)
-				zlog_debug(
-					"%s, Received a GraceLSA from router %d",
-					__PRETTY_FUNCTION__,
-					new->header->adv_router);
+			if (OSPF6_LSA_IS_MAXAGE(new)) {
 
-			if (ospf6_process_grace_lsa(ospf6, new, from)
-			    == OSPF6_GR_NOT_HELPER) {
 				if (IS_DEBUG_OSPF6_GR_HELPER)
 					zlog_debug(
-						"%s, Not moving to HELPER role, So dicarding GraceLSA",
-						__PRETTY_FUNCTION__);
-				return;
+						"%s, Received a maxage GraceLSA from router %d",
+						__PRETTY_FUNCTION__,
+						new->header->adv_router);
+				if (old) {
+					ospf6_process_maxage_grace_lsa(
+						ospf6, new, from);
+				} else {
+					if (IS_DEBUG_OSPF6_GR_HELPER)
+						zlog_debug(
+							"%s, GraceLSA doesn't exist in lsdb, so discarding GraceLSA",
+							__PRETTY_FUNCTION__);
+					return;
+				}
+			} else {
+
+				if (IS_DEBUG_OSPF6_GR_HELPER)
+					zlog_debug(
+						"%s, Received a GraceLSA from router %d",
+						__PRETTY_FUNCTION__,
+						new->header->adv_router);
+
+				if (ospf6_process_grace_lsa(ospf6, new, from)
+				    == OSPF6_GR_NOT_HELPER) {
+					if (IS_DEBUG_OSPF6_GR_HELPER)
+						zlog_debug(
+							"%s, Not moving to HELPER role, So dicarding GraceLSA",
+							__PRETTY_FUNCTION__);
+					return;
+				}
 			}
 		}
 

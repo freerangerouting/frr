@@ -191,7 +191,7 @@ static int ospf6_handle_grace_timer_expiry(struct thread *thread)
 
 	nbr->grHelperInfo.t_grace_timer = NULL;
 
-	// ospf6_gr_helper_exit(nbr, OSPF6_GR_HELPER_GRACE_TIMEOUT);
+	ospf6_gr_helper_exit(nbr, OSPF6_GR_HELPER_GRACE_TIMEOUT);
 	return OSPF6_SUCCESS;
 }
 
@@ -299,6 +299,7 @@ int ospf6_process_grace_lsa(struct ospf6 *ospf6, struct ospf6_lsa *lsa,
 	if (!IS_NBR_STATE_FULL(restarter)) {
 		if (IS_DEBUG_OSPF6_GR_HELPER) {
 			char src[64];
+
 			inet_ntop(AF_INET6, &restarter->linklocal_addr, src,
 				  sizeof(src));
 			zlog_debug(
@@ -381,6 +382,7 @@ int ospf6_process_grace_lsa(struct ospf6 *ospf6, struct ospf6_lsa *lsa,
 	} else {
 		if (IS_DEBUG_OSPF6_GR_HELPER) {
 			char src[64];
+
 			inet_ntop(AF_INET6, &restarter->linklocal_addr, src,
 				  sizeof(src));
 			zlog_debug(
@@ -411,6 +413,196 @@ int ospf6_process_grace_lsa(struct ospf6 *ospf6, struct ospf6_lsa *lsa,
 			 &restarter->grHelperInfo.t_grace_timer);
 
 	return OSPF6_GR_ACTIVE_HELPER;
+}
+
+/*
+ * Api to exit from HELPER role to take all actions
+ * required at exit.
+ * Ref rfc3623 section 3. and rfc51872
+ *
+ * ospf6
+ *    Ospf6 pointer.
+ *
+ * nbr
+ *    Ospf6 neighbour for which it is acting as HELPER.
+ *
+ * reason
+ *    The reason for exiting from HELPER.
+ *
+ * Returns:
+ *    Nothing.
+ */
+void ospf6_gr_helper_exit(struct ospf6_neighbor *nbr,
+			  enum ospf6_helper_exit_reason reason)
+{
+	struct ospf6_interface *oi = nbr->ospf6_if;
+	struct ospf6 *ospf6;
+
+	if (!oi)
+		return;
+
+	ospf6 = oi->area->ospf6;
+
+	if (!OSPF6_GR_IS_ACTIVE_HELPER(nbr))
+		return;
+
+	if (IS_DEBUG_OSPF6_GR_HELPER) {
+		char src[64];
+
+		inet_ntop(AF_INET6, &nbr->linklocal_addr, src, sizeof(src));
+		zlog_debug("%s, Exiting from HELPER support to %s, due to %s",
+			   __PRETTY_FUNCTION__, src,
+			   ospf6_exit_reason_desc[reason]);
+	}
+
+	/* Reset helper status*/
+	nbr->grHelperInfo.grHelper_status = OSPF6_GR_NOT_HELPER;
+	nbr->grHelperInfo.helperExit_reason = reason;
+	nbr->grHelperInfo.actual_grace_period = 0;
+	nbr->grHelperInfo.recvd_grace_period = 0;
+	nbr->grHelperInfo.grRestart_reason = 0;
+	ospf6->ospf6_helper_cfg.lastExitReason = reason;
+
+	/* If the exit not triggered due to grace timer
+	 * expairy , stop the grace timer.
+	 */
+	if (reason != OSPF6_GR_HELPER_GRACE_TIMEOUT)
+		THREAD_OFF(nbr->grHelperInfo.t_grace_timer);
+
+	if (ospf6->ospf6_helper_cfg.activeRestarterCnt <= 0) {
+		zlog_err(
+			"OSPF6 GR-Helper: activeRestarterCnt should be greater than zero here.");
+		return;
+	}
+	/* Decrement active Restarter count */
+	ospf6->ospf6_helper_cfg.activeRestarterCnt--;
+
+	/* check exit triggered due to successful completion
+	 * of graceful restart.
+	 */
+	if (reason != OSPF6_GR_HELPER_COMPLETED) {
+		if (IS_DEBUG_OSPF6_GR_HELPER) {
+			char src[64];
+
+			inet_ntop(AF_INET6, &nbr->linklocal_addr, src,
+				  sizeof(src));
+			zlog_debug("%s, Unsuccessful GR exit. RESTARTER :%s",
+				   __PRETTY_FUNCTION__, src);
+		}
+	}
+
+	/*Recalculate the DR for the network segment */
+	dr_election(oi);
+
+	/* Originate a router LSA */
+	OSPF6_ROUTER_LSA_SCHEDULE(nbr->ospf6_if->area);
+
+	/* Originate network lsa if it is an DR in the LAN */
+	if (nbr->ospf6_if->state == OSPF6_INTERFACE_DR)
+		OSPF6_NETWORK_LSA_SCHEDULE(nbr->ospf6_if);
+}
+
+/*
+ * Process Maxage Grace LSA.
+ * It is a indication for successfull completion of GR.
+ * If router acting as HELPER, It exits from helper role.
+ *
+ * ospf6
+ *    Ospf6 pointer.
+ *
+ * lsa
+ *    Grace LSA received from RESTARTER.
+ *
+ * nbr
+ *    ospf6 neighbour which requets the router to act as
+ *    HELPER.
+ *
+ * Returns:
+ *    Nothing.
+ */
+void ospf6_process_maxage_grace_lsa(struct ospf6 *ospf6, struct ospf6_lsa *lsa,
+				    struct ospf6_neighbor *restarter)
+{
+	struct in_addr restartAddr = {0};
+	uint8_t restartReason = 0;
+	uint32_t graceInterval = 0;
+	int ret;
+
+	/* Extract the grace lsa packet fields */
+	ret = ospf6_extract_grace_lsa_fields(lsa, &graceInterval,
+					     &restartReason);
+	if (ret != OSPF6_SUCCESS) {
+		if (IS_DEBUG_OSPF6_GR_HELPER)
+			zlog_debug("%s, Wrong Grace LSA packet.",
+				   __PRETTY_FUNCTION__);
+		return;
+	}
+
+	if (IS_DEBUG_OSPF6_GR_HELPER)
+		zlog_debug("%s, GraceLSA received for neighbour %s.",
+			   __PRETTY_FUNCTION__, inet_ntoa(restartAddr));
+
+	ospf6_gr_helper_exit(restarter, OSPF6_GR_HELPER_COMPLETED);
+}
+
+/*
+ * Actions to be taken  when topo change detected
+ * HELPER will be exited upon a topo change.
+ *
+ * ospf6
+ *    ospf6 pointer
+ * lsa
+ *    topo change occured due to this lsa(type (1-5  and 7)
+ *
+ * Returns:
+ *    Nothing
+ */
+void ospf6_helper_handle_topo_chg(struct ospf6 *ospf6, struct ospf6_lsa *lsa)
+{
+	struct listnode *i, *j, *k;
+	struct ospf6_neighbor *nbr = NULL;
+	struct ospf6_area *oa = NULL;
+	struct ospf6_interface *oi = NULL;
+
+	if (!ospf6->ospf6_helper_cfg.activeRestarterCnt)
+		return;
+
+	/* Topo change not required to be hanlded if strict
+	 * LSA check is disbaled for this router.
+	 */
+	if (!ospf6->ospf6_helper_cfg.strictLsaCheck)
+		return;
+
+	if (IS_DEBUG_OSPF6_GR_HELPER)
+		zlog_debug(
+			"%s, Topo change detected due to lsa LSID:%d type:%d",
+			__PRETTY_FUNCTION__, lsa->header->id,
+			ntohs(lsa->header->type));
+
+	lsa->tobe_acknowledged = OSPF6_TRUE;
+
+	for (ALL_LIST_ELEMENTS_RO(ospf6->area_list, i, oa))
+		for (ALL_LIST_ELEMENTS_RO(oa->if_list, j, oi)) {
+
+			/* Ref rfc3623 section 3.2.3.b and rfc5187
+			 * If change due to external LSA and if the area is
+			 * stub, then it is not a topo change. Since Type-5
+			 * lsas will not be flooded in stub area.
+			 */
+			if (IS_AREA_STUB(oi->area)
+			    && ((lsa->header->type == OSPF6_LSTYPE_AS_EXTERNAL)
+				|| (lsa->header->type == OSPF6_LSTYPE_TYPE_7)
+				|| (lsa->header->type
+				    == OSPF6_LSTYPE_INTER_ROUTER))) {
+				continue;
+			}
+
+			for (ALL_LIST_ELEMENTS_RO(oi->neighbor_list, k, nbr)) {
+
+				ospf6_gr_helper_exit(nbr,
+						     OSPF6_GR_HELPER_TOPO_CHG);
+			}
+		}
 }
 
 /* Debug commands */
