@@ -87,6 +87,7 @@ const char *ospf6_rejected_reason_desc[] = {
 	"Supports only planned restart but received for unplanned",
 	"Topo change due to change in lsa rxmt list",
 	"LSA age is more than Grace interval",
+	"Router is in the process of graceful restart",
 };
 
 static unsigned int ospf6_enable_rtr_hash_key(const void *data)
@@ -363,6 +364,16 @@ int ospf6_process_grace_lsa(struct ospf6 *ospf6, struct ospf6_lsa *lsa,
 		return OSPF6_GR_NOT_HELPER;
 	}
 
+	if (ospf6->gr_info.restart_in_progress) {
+		if (IS_DEBUG_OSPF6_GR_HELPER)
+			zlog_debug(
+				"%s: router is in the process of graceful restart",
+				__func__);
+		restarter->grHelperInfo.rejected_reason =
+			OSPF6_HELPER_RESTARTING;
+		return OSPF6_GR_NOT_HELPER;
+	}
+
 	/* check supported grace period configured
 	 * if configured, use this to start the grace
 	 * timer otherwise use the interval received
@@ -584,11 +595,11 @@ void ospf6_helper_handle_topo_chg(struct ospf6 *ospf6, struct ospf6_lsa *lsa)
 	if (!ospf6->ospf6_helper_cfg.strictLsaCheck)
 		return;
 
-	if (IS_DEBUG_OSPF6_GR_HELPER)
-		zlog_debug(
-			"%s, Topo change detected due to lsa LSID:%d type:%d",
-			__PRETTY_FUNCTION__, lsa->header->id,
-			ntohs(lsa->header->type));
+	if (IS_DEBUG_OSPF6_GR_HELPER) {
+		zlog_debug("%s, Topo change detected due to LSA %s",
+			   __PRETTY_FUNCTION__, lsa->name);
+		ospf6_lsa_header_print(lsa);
+	}
 
 	lsa->tobe_acknowledged = OSPF6_TRUE;
 

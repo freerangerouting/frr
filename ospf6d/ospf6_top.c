@@ -454,6 +454,12 @@ struct ospf6 *ospf6_instance_create(const char *name)
 	if (ospf6->fd < 0)
 		return ospf6;
 
+	/*
+	 * Read from non-volatile memory whether this instance is performing a
+	 * graceful restart or not.
+	 */
+	ospf6_gr_nvm_read(ospf6);
+
 	thread_add_read(master, ospf6_receive, ospf6, ospf6->fd,
 			&ospf6->t_ospf6_receive);
 
@@ -469,7 +475,8 @@ void ospf6_delete(struct ospf6 *o)
 	QOBJ_UNREG(o);
 
 	ospf6_gr_helper_deinit(o);
-	ospf6_flush_self_originated_lsas_now(o);
+	if (!o->gr_info.prepare_in_progress)
+		ospf6_flush_self_originated_lsas_now(o);
 	ospf6_disable(o);
 	ospf6_del(o);
 
@@ -530,6 +537,7 @@ static void ospf6_disable(struct ospf6 *o)
 		THREAD_OFF(o->t_ase_calc);
 		THREAD_OFF(o->t_distribute_update);
 		THREAD_OFF(o->t_ospf6_receive);
+		THREAD_OFF(o->gr_info.t_grace_period);
 	}
 }
 
@@ -1771,6 +1779,8 @@ static int config_write_ospf6(struct vty *vty)
 		ospf6_spf_config_write(vty, ospf6);
 		ospf6_distance_config_write(vty, ospf6);
 		ospf6_distribute_config_write(vty, ospf6);
+		config_write_ospf6_gr(vty, ospf6);
+		config_write_ospf6_gr_helper(vty, ospf6);
 		vty_out(vty, "!\n");
 	}
 	return 0;
