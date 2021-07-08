@@ -127,7 +127,7 @@ void frrscript_init(const char *scriptdir);
 #define ENCODE_ARGS_WITH_STATE(L, value)                                       \
 	_Generic((value), \
 int : lua_pushinteger,                                          \
-int *: lua_pushintegerp,                                        \
+int * : lua_pushintegerp,                                        \
 long long : lua_pushinteger,                                    \
 long long * : lua_pushlonglongp,                                \
 struct prefix * : lua_pushprefix,                               \
@@ -154,7 +154,7 @@ union sockunion * : lua_decode_sockunion,                       \
 time_t * : lua_decode_timet,                                    \
 char * : lua_decode_stringp,                                    \
 struct attr * : lua_decode_attr,                                \
-default: _lua_noop(value)                                       \
+default : _lua_noop(value)                                      \
 )(L, -1, value)
 
 /*
