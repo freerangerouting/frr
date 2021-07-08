@@ -110,6 +110,12 @@ void frrscript_init(const char *scriptdir);
 	} while (0)
 
 /*
+ * Fully polymorphic noop function. Used below where we need a noop decoder
+ * for any type.
+ */
+#define _lua_noop(v) ({ void _ (lua_State *L, int idx, typeof(v) _v) {} _; })
+
+/*
  * Maps the type of value to its encoder/decoder.
  * Add new mappings here.
  *
@@ -145,7 +151,7 @@ time_t * : lua_decode_timet,                                    \
 char * : lua_decode_stringp,                                    \
 struct attr * : lua_decode_attr,                                \
 struct peer * : lua_decode_noop,                                \
-const struct prefix * : lua_decode_noop                         \
+default: _lua_noop(value)                                       \
 )(L, -1, value)
 
 /*
