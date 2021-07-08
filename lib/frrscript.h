@@ -152,7 +152,6 @@ union sockunion * : lua_decode_sockunion,                       \
 time_t * : lua_decode_timet,                                    \
 char * : lua_decode_stringp,                                    \
 struct attr * : lua_decode_attr,                                \
-struct peer * : lua_decode_noop,                                \
 default: _lua_noop(value)                                       \
 )(L, -1, value)
 
