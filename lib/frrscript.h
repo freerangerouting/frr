@@ -113,7 +113,13 @@ void frrscript_init(const char *scriptdir);
  * Fully polymorphic noop function. Used below where we need a noop decoder
  * for any type.
  */
-#define _lua_noop(v) ({ void _ (lua_State *L, int idx, typeof(v) _v) {} _; })
+#define _lua_noop(v)                                                           \
+	({                                                                     \
+		void _(lua_State *L, int idx, typeof(v) _v)                    \
+		{                                                              \
+		}                                                              \
+		_;                                                             \
+	})
 
 /*
  * Maps the type of value to its encoder/decoder.
