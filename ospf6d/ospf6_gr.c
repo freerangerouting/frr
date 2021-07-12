@@ -475,7 +475,7 @@ static void ospf6_gr_nvm_update(struct ospf6 *ospf6)
 
 	inst_name = ospf6->name ? ospf6->name : VRF_DEFAULT_NAME;
 
-	json = json_object_from_file(OSPF6D_GR_STATE);
+	json = json_object_from_file((char *)OSPF6D_GR_STATE);
 	if (json == NULL)
 		json = json_object_new_object();
 
@@ -503,7 +503,8 @@ static void ospf6_gr_nvm_update(struct ospf6 *ospf6)
 	json_object_int_add(json_instance, "timestamp",
 			    time(NULL) + ospf6->gr_info.grace_period);
 
-	json_object_to_file_ext(OSPF6D_GR_STATE, json, JSON_C_TO_STRING_PRETTY);
+	json_object_to_file_ext((char *)OSPF6D_GR_STATE, json,
+				JSON_C_TO_STRING_PRETTY);
 	json_object_free(json);
 }
 
@@ -519,7 +520,7 @@ static void ospf6_gr_nvm_delete(struct ospf6 *ospf6)
 
 	inst_name = ospf6->name ? ospf6->name : VRF_DEFAULT_NAME;
 
-	json = json_object_from_file(OSPF6D_GR_STATE);
+	json = json_object_from_file((char *)OSPF6D_GR_STATE);
 	if (json == NULL)
 		json = json_object_new_object();
 
@@ -531,7 +532,8 @@ static void ospf6_gr_nvm_delete(struct ospf6 *ospf6)
 
 	json_object_object_del(json_instances, inst_name);
 
-	json_object_to_file_ext(OSPF6D_GR_STATE, json, JSON_C_TO_STRING_PRETTY);
+	json_object_to_file_ext((char *)OSPF6D_GR_STATE, json,
+				JSON_C_TO_STRING_PRETTY);
 	json_object_free(json);
 }
 
@@ -550,7 +552,7 @@ void ospf6_gr_nvm_read(struct ospf6 *ospf6)
 
 	inst_name = ospf6->name ? ospf6->name : VRF_DEFAULT_NAME;
 
-	json = json_object_from_file(OSPF6D_GR_STATE);
+	json = json_object_from_file((char *)OSPF6D_GR_STATE);
 	if (json == NULL)
 		json = json_object_new_object();
 
@@ -594,7 +596,8 @@ void ospf6_gr_nvm_read(struct ospf6 *ospf6)
 
 	json_object_object_del(json_instances, inst_name);
 
-	json_object_to_file_ext(OSPF6D_GR_STATE, json, JSON_C_TO_STRING_PRETTY);
+	json_object_to_file_ext((char *)OSPF6D_GR_STATE, json,
+				JSON_C_TO_STRING_PRETTY);
 	json_object_free(json);
 }
 
