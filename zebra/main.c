@@ -418,6 +418,7 @@ int main(int argc, char **argv)
 	zebra_pw_vty_init();
 	zebra_pbr_init();
 	zebra_opaque_init();
+
 	zebra_srte_init();
 	zebra_srv6_init();
 	zebra_srv6_vty_init();
