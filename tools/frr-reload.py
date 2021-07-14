@@ -2012,6 +2012,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--daemon", help="daemon for which want to replace the config", default=""
     )
+    parser.add_argument(
+        "--test-reset",
+        action="store_true",
+        help="Used by topotest to not delete debug or log file commands",
+    )
 
     args = parser.parse_args()
 
@@ -2125,7 +2130,7 @@ if __name__ == "__main__":
                     service_integrated_vtysh_config = False
                     break
 
-    if not service_integrated_vtysh_config and not args.daemon:
+    if not args.test and not service_integrated_vtysh_config and not args.daemon:
         log.error(
             "'service integrated-vtysh-config' is not configured, this is required for 'service frr reload'"
         )
@@ -2156,21 +2161,33 @@ if __name__ == "__main__":
         lines_to_configure = []
 
         if lines_to_del:
-            print("\nLines To Delete")
-            print("===============")
+            if not args.test_reset:
+                print("\nLines To Delete")
+                print("===============")
 
             for (ctx_keys, line) in lines_to_del:
 
                 if line == "!":
                     continue
 
-                cmd = "\n".join(lines_to_config(ctx_keys, line, True))
+                nolines = lines_to_config(ctx_keys, line, True)
+
+                # For topotests leave these lines in (don't delete)
+                # [chopps: why is "log file" more special than other "log" commands?]
+                if args.test_reset:
+                    nolines = [x for x in nolines if "debug" not in x and "log file" not in x]
+                    if not nolines:
+                        continue
+
+                cmd = "\n".join(nolines)
                 lines_to_configure.append(cmd)
+                # assert "log file" not in cmd, "cmd: {} line: {}".format(cmd, line)
                 print(cmd)
 
         if lines_to_add:
-            print("\nLines To Add")
-            print("============")
+            if not args.test_reset:
+                print("\nLines To Add")
+                print("============")
 
             for (ctx_keys, line) in lines_to_add:
 
