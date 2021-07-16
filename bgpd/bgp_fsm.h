@@ -109,7 +109,11 @@
 	 && !CHECK_FLAG(peer->cap, PEER_CAP_RESTART_BIT_ADV))
 
 /* Prototypes. */
-extern void bgp_fsm_event_update(struct peer *peer, int valid);
+
+/*
+ * Update FSM for peer based on whether we have valid nexthops or not.
+ */
+extern void bgp_fsm_nht_update(struct peer *peer, bool has_valid_nexthops);
 extern int bgp_event(struct thread *);
 extern int bgp_event_update(struct peer *, enum bgp_fsm_events event);
 extern int bgp_stop(struct peer *peer);
@@ -164,4 +168,5 @@ const char *print_peer_gr_mode(enum peer_mode pr_mode);
 const char *print_peer_gr_cmd(enum peer_gr_command pr_gr_cmd);
 const char *print_global_gr_mode(enum global_mode gl_mode);
 const char *print_global_gr_cmd(enum global_gr_command gl_gr_cmd);
+int bgp_peer_reg_with_nht(struct peer *peer);
 #endif /* _QUAGGA_BGP_FSM_H */

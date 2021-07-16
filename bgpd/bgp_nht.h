@@ -50,7 +50,7 @@ extern int bgp_find_or_add_nexthop(struct bgp *bgp_route,
  */
 extern void bgp_unlink_nexthop(struct bgp_path_info *p);
 void bgp_unlink_nexthop_by_peer(struct peer *peer);
-
+void bgp_replace_nexthop_by_peer(struct peer *from, struct peer *to);
 /**
  * bgp_delete_connected_nexthop() - Reset the 'peer' pointer for a connected
  * nexthop entry. If no paths reference the nexthop, it will be unregistered
@@ -89,5 +89,10 @@ extern void bgp_nht_register_nexthops(struct bgp *bgp);
  */
 extern void bgp_nht_reg_enhe_cap_intfs(struct peer *peer);
 extern void bgp_nht_dereg_enhe_cap_intfs(struct peer *peer);
+
+extern void bgp_nht_ifp_up(struct interface *ifp);
+extern void bgp_nht_ifp_down(struct interface *ifp);
+
+extern void bgp_nht_interface_events(struct peer *peer);
 
 #endif /* _BGP_NHT_H */

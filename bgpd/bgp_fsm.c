@@ -97,7 +97,7 @@ static int bgp_holdtime_timer(struct thread *);
 static int bgp_start(struct peer *);
 
 /* Register peer with NHT */
-static int bgp_peer_reg_with_nht(struct peer *peer)
+int bgp_peer_reg_with_nht(struct peer *peer)
 {
 	int connected = 0;
 
@@ -333,6 +333,8 @@ static struct peer *peer_xfer_conn(struct peer *from_peer)
 	 * needed, even on a passive connection.
 	 */
 	bgp_peer_reg_with_nht(peer);
+	if (from_peer)
+		bgp_replace_nexthop_by_peer(from_peer, peer);
 
 	bgp_reads_on(peer);
 	bgp_writes_on(peer);
@@ -1526,6 +1528,12 @@ static int bgp_connect_fail(struct peer *peer)
 		return -1;
 	}
 
+	/*
+	 * If we are doing nht for a peer that ls v6 LL based
+	 * massage the event system to make things happy
+	 */
+	bgp_nht_interface_events(peer);
+
 	return (bgp_stop(peer));
 }
 
@@ -2037,24 +2045,24 @@ static int bgp_fsm_exeption(struct peer *peer)
 	return (bgp_stop(peer));
 }
 
-void bgp_fsm_event_update(struct peer *peer, int valid)
+void bgp_fsm_nht_update(struct peer *peer, bool has_valid_nexthops)
 {
 	if (!peer)
 		return;
 
 	switch (peer->status) {
 	case Idle:
-		if (valid)
+		if (has_valid_nexthops)
 			BGP_EVENT_ADD(peer, BGP_Start);
 		break;
 	case Connect:
-		if (!valid) {
+		if (!has_valid_nexthops) {
 			BGP_TIMER_OFF(peer->t_connect);
 			BGP_EVENT_ADD(peer, TCP_fatal_error);
 		}
 		break;
 	case Active:
-		if (valid) {
+		if (has_valid_nexthops) {
 			BGP_TIMER_OFF(peer->t_connect);
 			BGP_EVENT_ADD(peer, ConnectRetry_timer_expired);
 		}
@@ -2062,7 +2070,8 @@ void bgp_fsm_event_update(struct peer *peer, int valid)
 	case OpenSent:
 	case OpenConfirm:
 	case Established:
-		if (!valid && (peer->gtsm_hops == BGP_GTSM_HOPS_CONNECTED))
+		if (!has_valid_nexthops
+		    && (peer->gtsm_hops == BGP_GTSM_HOPS_CONNECTED))
 			BGP_EVENT_ADD(peer, TCP_fatal_error);
 	case Clearing:
 	case Deleted:
