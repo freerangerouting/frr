@@ -50,13 +50,14 @@ Shut down VxLAN interface at PE1. This should withdraw type-2 routes. Check stat
 Enable VxLAN interface again. Check states.
 """
 
-import os
-import sys
 import json
-from functools import partial
-import pytest
-import time
+import os
 import platform
+import sys
+import time
+from functools import partial
+
+import pytest
 
 #Current Working Directory
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -65,17 +66,12 @@ sys.path.append(os.path.join(CWD, "../"))
 # pylint: disable=C0413
 # Import topogen and topotest helpers
 from lib import topotest
+from lib.common_config import (generate_support_bundle, step,
+                               write_test_footer, write_test_header)
+# Required to instantiate the topology builder class.
+from lib.micronet_compat import Topo
 from lib.topogen import Topogen, TopoRouter, get_topogen
 from lib.topolog import logger
-from lib.common_config import (
-    step,
-    write_test_header,
-    write_test_footer,
-    generate_support_bundle,
-)
-
-# Required to instantiate the topology builder class.
-from mininet.topo import Topo
 
 #Global variables
 PES = ['PE1', 'PE2']
