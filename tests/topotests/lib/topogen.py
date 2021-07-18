@@ -38,11 +38,12 @@ Basic usage instructions:
 * After running stop Mininet with: tgen.stop_topology()
 """
 
+import inspect
+import json
+import logging
 import os
 import sys
-import io
-import logging
-import json
+from collections import OrderedDict
 
 if sys.version_info[0] > 2:
     import configparser
@@ -53,16 +54,14 @@ import glob
 import grp
 import platform
 import pwd
-import subprocess
-import pytest
-
-from mininet.net import Mininet
-from mininet.log import setLogLevel
-from mininet.cli import CLI
 
 from lib import topotest
+from lib.micronet import Bridge
+from lib.micronet_compat import Mininet, setLogLevel
 from lib.topolog import logger, logger_config
 from lib.topotest import set_sysctl
+
+setLogLevel(logging.DEBUG)
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 
@@ -88,6 +87,12 @@ def set_topogen(tgen):
     global global_tgen
     global_tgen = tgen
 
+def is_string(value):
+    """Return True if value is a string."""
+    try:
+        return isinstance(value, basestring)  # type: ignore
+    except NameError:
+        return isinstance(value, str)
 
 #
 # Main class: topology builder
@@ -107,10 +112,11 @@ class Topogen(object):
 
     CONFIG_SECTION = "topogen"
 
-    def __init__(self, cls, modname="unnamed"):
+    def __init__(self, topodef, modname="unnamed"):
         """
         Topogen initialization function, takes the following arguments:
-        * `cls`: the topology class that is child of mininet.topo
+        * `cls`: OLD:uthe topology class that is child of mininet.topo or a build function.
+        * `topodef`: A dictionary defining the topology or a function that will do the same
         * `modname`: module name must be a unique name to identify logs later.
         """
         self.config = None
@@ -123,16 +129,16 @@ class Topogen(object):
         self.errorsd = {}
         self.errors = ""
         self.peern = 1
-        self._init_topo(cls)
+        self._init_topo(topodef)
         logger.info("loading topology: {}".format(self.modname))
 
-    @staticmethod
-    def _mininet_reset():
-        "Reset the mininet environment"
-        # Clean up the mininet environment
-        os.system("mn -c > /dev/null 2>&1")
+    # @staticmethod
+    # def _mininet_reset():
+    #     "Reset the mininet environment"
+    #     # Clean up the mininet environment
+    #     os.system("mn -c > /dev/null 2>&1")
 
-    def _init_topo(self, cls):
+    def _init_topo(self, topodef):
         """
         Initialize the topogily provided by the user. The user topology class
         must call get_topogen() during build() to get the topogen object.
@@ -151,12 +157,65 @@ class Topogen(object):
         # Load the default topology configurations
         self._load_config()
 
-        # Initialize the API
-        self._mininet_reset()
-        cls()
+        # Old twisty way of creating sub-classed topology object which has it's build
+        # method invoked which calls Topogen methods which then call Topo methods to
+        # create a topology within the Topo object, which is then used by
+        # Mininet(Micronet) to build the actual topology.
+        if inspect.isclass(topodef):
+            self.topo = topodef()
+
         self.net = Mininet(controller=None, topo=self.topo)
+
+        # New direct way: Either a dictionary defines the topology or a build function
+        # is supplied which builds the topology by calling Topogen methods which call
+        # Mininet(Micronet) methods to create the actual topology.
+        if not inspect.isclass(topodef):
+            if callable(topodef):
+                topodef(self)
+                self.net.configure_hosts()
+            elif topodef:
+                self.add_topology_from_dict(topodef)
+
+
         for gear in self.gears.values():
             gear.net = self.net
+
+    def add_topology_from_dict(self, topodef):
+
+        keylist = topodef.keys() if isinstance(topodef, OrderedDict) else sorted(topodef.keys())
+        # ---------------------------
+        # Create all referenced hosts
+        # ---------------------------
+        for oname in keylist:
+            tup = (topodef[oname],) if is_string(topodef[oname]) else topodef[oname]
+            for e in tup:
+                desc = e.split(":")
+                name = desc[0]
+                if name not in self.gears:
+                    logging.debug("Adding router: %s", name)
+                    self.add_router(name)
+
+        # ------------------------------
+        # Create all referenced switches
+        # ------------------------------
+        for oname in keylist:
+            if oname is not None and oname not in self.gears:
+                logging.warning("Adding switch: %s", oname)
+                self.add_switch(oname)
+
+        # ----------------
+        # Create all links
+        # ----------------
+        for oname in keylist:
+            tup = (topodef[oname],) if is_string(topodef[oname]) else topodef[oname]
+            for e in tup:
+                desc = e.split(":")
+                name = desc[0]
+                ifname = desc[1] if len(desc) > 1 else None
+                sifname = desc[2] if len(desc) > 2 else None
+                self.add_link(self.gears[oname], self.gears[name], sifname, ifname)
+
+        self.net.configure_hosts()
 
     def _load_config(self):
         """
@@ -167,7 +226,7 @@ class Topogen(object):
         pytestini_path = os.path.join(CWD, "../pytest.ini")
         self.config.read(pytestini_path)
 
-    def add_router(self, name=None, cls=topotest.Router, **params):
+    def add_router(self, name=None, cls=None, **params):
         """
         Adds a new router to the topology. This function has the following
         options:
@@ -176,6 +235,16 @@ class Topogen(object):
         * `routertype`: (optional) `frr`
         Returns a TopoRouter.
         """
+
+        # We need to default to LinuxRouter so that ipv6 forwarding sysctl is set early.
+        # This is important b/c it disables autoconf of interface addresses which for
+        # routers we do not want.
+        if cls is None:
+            if sys.platform.startswith("linux"):
+                cls = topotest.LinuxRouter
+            else:
+                cls = topotest.FreeBSDRouter
+
         if name is None:
             name = "r{}".format(self.routern)
         if name in self.gears:
@@ -190,7 +259,7 @@ class Topogen(object):
         self.routern += 1
         return self.gears[name]
 
-    def add_switch(self, name=None, cls=topotest.LegacySwitch):
+    def add_switch(self, name=None, cls=Bridge):
         """
         Adds a new switch to the topology. This function has the following
         options:
@@ -258,7 +327,10 @@ class Topogen(object):
 
         node1.register_link(ifname1, node2, ifname2)
         node2.register_link(ifname2, node1, ifname1)
-        self.topo.addLink(node1.name, node2.name, intfName1=ifname1, intfName2=ifname2)
+        if self.net:
+            self.net.add_link(node1.name, node2.name, ifname1, ifname2)
+        else:
+            self.topo.addLink(node1.name, node2.name, intfName1=ifname1, intfName2=ifname2)
 
     def get_gears(self, geartype):
         """
@@ -368,7 +440,8 @@ class Topogen(object):
                 "you must run pytest with '-s' in order to use mininet CLI"
             )
 
-        CLI(self.net)
+        #uCLI(self.net)
+        raise Exception("CLI unimplemented")
 
     def is_memleak_enabled(self):
         "Returns `True` if memory leak report is enable, otherwise `False`."
@@ -441,7 +514,6 @@ class TopoGear(object):
     def __init__(self):
         self.tgen = None
         self.name = None
-        self.cls = None
         self.links = {}
         self.linkn = 0
 
@@ -464,12 +536,14 @@ class TopoGear(object):
         logger.info('stopping "{}"'.format(self.name))
         return ""
 
-    def run(self, command):
+    def cmd(self, command, **kwargs):
         """
         Runs the provided command string in the router and returns a string
         with the response.
         """
-        return self.tgen.net[self.name].cmd(command)
+        return self.tgen.net[self.name].cmd(command, **kwargs)
+
+    run = cmd
 
     def add_link(self, node, myif=None, nodeif=None):
         """
@@ -502,7 +576,9 @@ class TopoGear(object):
         extract = ""
         if netns is not None:
             extract = "ip netns exec {} ".format(netns)
-        return self.run("{}ip link set dev {} {}".format(extract, myif, operation))
+
+        uname = self.tgen.net[self.name].get_uniq_name(myif)
+        return self.run("{}ip link set dev {} {}".format(extract, uname, operation))
 
     def peer_link_enable(self, myif, enabled=True, netns=None):
         """
@@ -549,6 +625,7 @@ class TopoRouter(TopoGear):
     # The default required directories by FRR
     PRIVATE_DIRS = [
         "/etc/frr",
+        "/etc/snmp",
         "/var/run/frr",
         "/var/log",
     ]
@@ -604,9 +681,7 @@ class TopoRouter(TopoGear):
         """
         super(TopoRouter, self).__init__()
         self.tgen = tgen
-        self.net = None
         self.name = name
-        self.cls = cls
         self.options = {}
         self.routertype = params.get("routertype", "frr")
         if "privateDirs" not in params:
@@ -631,7 +706,10 @@ class TopoRouter(TopoGear):
         logfile = "{0}/{1}.log".format(self.logdir, name)
         self.logger = logger_config.get_logger(name=name, target=logfile)
 
-        self.tgen.topo.addNode(self.name, cls=self.cls, **params)
+        if tgen.net:
+            tgen.net.add_host(self.name, cls=cls, **params)
+        else:
+            tgen.topo.addNode(self.name, cls=cls, **params)
 
     def __str__(self):
         gear = super(TopoRouter, self).__str__()
@@ -706,6 +784,8 @@ class TopoRouter(TopoGear):
         # Enable all daemon command logging, logging files
         # and set them to the start dir.
         for daemon, enabled in nrouter.daemons.items():
+            if daemon == "snmpd":
+                continue
             if enabled == 0:
                 continue
             self.vtysh_cmd(
@@ -909,10 +989,11 @@ class TopoSwitch(TopoGear):
     def __init__(self, tgen, cls, name):
         super(TopoSwitch, self).__init__()
         self.tgen = tgen
-        self.net = None
         self.name = name
-        self.cls = cls
-        self.tgen.topo.addSwitch(name, cls=self.cls)
+        if tgen.net:
+            tgen.net.add_switch(name)
+        else:
+            tgen.topo.addSwitch(name, cls=cls)
 
     def __str__(self):
         gear = super(TopoSwitch, self).__str__()
@@ -935,10 +1016,12 @@ class TopoHost(TopoGear):
         """
         super(TopoHost, self).__init__()
         self.tgen = tgen
-        self.net = None
         self.name = name
         self.options = params
-        self.tgen.topo.addHost(name, **params)
+        if tgen.net:
+            tgen.net.add_host(name, **params)
+        else:
+            tgen.topo.addHost(name, **params)
 
     def __str__(self):
         gear = super(TopoHost, self).__str__()
@@ -973,7 +1056,10 @@ class TopoExaBGP(TopoHost):
         """
         params["privateDirs"] = self.PRIVATE_DIRS
         super(TopoExaBGP, self).__init__(tgen, name, **params)
-        self.tgen.topo.addHost(name, **params)
+        if tgen.net:
+            tgen.net.add_host(name, **params)
+        else:
+            tgen.topo.addHost(name, **params)
 
     def __str__(self):
         gear = super(TopoExaBGP, self).__str__()
@@ -988,7 +1074,7 @@ class TopoExaBGP(TopoHost):
         * Make all python files runnable
         * Run ExaBGP with env file `env_file` and configuration peer*/exabgp.cfg
         """
-        self.run("mkdir /etc/exabgp")
+        self.run("mkdir -p /etc/exabgp")
         self.run("chmod 755 /etc/exabgp")
         self.run("cp {}/* /etc/exabgp/".format(peer_dir))
         if env_file is not None:
