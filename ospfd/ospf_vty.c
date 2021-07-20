@@ -10011,19 +10011,21 @@ DEFPY(ospf_gr_helper_planned_only,
 }
 
 /* External Route Aggregation */
-DEFUN (ospf_external_route_aggregation,
-       ospf_external_route_aggregation_cmd,
-       "summary-address A.B.C.D/M [tag (1-4294967295)]",
-       "External summary address\n"
-       "Summary address prefix (a.b.c.d/m) \n"
-       "Router tag \n"
-       "Router tag value\n")
+DEFUN(ospf_external_route_aggregation, ospf_external_route_aggregation_cmd,
+      "summary-address A.B.C.D/M [tag (1-4294967295)] [metric (0-16777215)]",
+      "External summary address\n"
+      "Summary address prefix (a.b.c.d/m) \n"
+      "Router tag \n"
+      "Router tag value\n"
+      "Metric \n"
+      "Advertised metric for this route\n")
 {
 	VTY_DECLVAR_INSTANCE_CONTEXT(ospf, ospf);
 	struct prefix_ipv4 p;
 	int idx = 1;
 	route_tag_t tag = 0;
 	int ret = OSPF_SUCCESS;
+	int metric = -1;
 
 	str2prefix_ipv4(argv[idx]->arg, &p);
 
@@ -10041,29 +10043,42 @@ DEFUN (ospf_external_route_aggregation,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	if (argc > 2)
-		tag = strtoul(argv[idx + 2]->arg, NULL, 10);
+	idx = 2;
 
-	ret = ospf_asbr_external_aggregator_set(ospf, &p, tag);
+	if (argc == 4) {
+		if (strmatch(argv[idx]->text, "tag"))
+			tag = strtoul(argv[idx + 1]->arg, NULL, 10);
+		else if (strmatch(argv[idx]->text, "metric"))
+			metric = strtoul(argv[idx + 1]->arg, NULL, 10);
+	} else if (argc == 6) {
+		tag = strtoul(argv[idx + 1]->arg, NULL, 10);
+
+		metric = strtoul(argv[idx + 3]->arg, NULL, 10);
+	}
+
+	ret = ospf_asbr_external_aggregator_set(ospf, &p, tag, metric);
 	if (ret == OSPF_INVALID)
 		vty_out(vty, "Inavlid configuration!!\n");
 
 	return CMD_SUCCESS;
 }
 
-DEFUN (no_ospf_external_route_aggregation,
-       no_ospf_external_route_aggregation_cmd,
-       "no summary-address A.B.C.D/M [tag (1-4294967295)]",
-       NO_STR
-       "External summary address\n"
-       "Summary address prefix (a.b.c.d/m)\n"
-       "Router tag\n"
-       "Router tag value\n")
+DEFUN(no_ospf_external_route_aggregation,
+      no_ospf_external_route_aggregation_cmd,
+      "no summary-address A.B.C.D/M [tag (1-4294967295)] [metric (0-16777215)]",
+      NO_STR
+      "External summary address\n"
+      "Summary address prefix (a.b.c.d/m)\n"
+      "Router tag\n"
+      "Router tag value\n"
+      "Metric \n"
+      "Advertised metric for this route\n")
 {
 	VTY_DECLVAR_INSTANCE_CONTEXT(ospf, ospf);
 	struct prefix_ipv4 p;
 	int idx = 2;
 	route_tag_t tag = 0;
+	int metric = -1;
 	int ret = OSPF_SUCCESS;
 
 	str2prefix_ipv4(argv[idx]->arg, &p);
@@ -10082,10 +10097,19 @@ DEFUN (no_ospf_external_route_aggregation,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	if (argc > 3)
-		tag = strtoul(argv[idx + 2]->arg, NULL, 10);
+	idx = 3;
 
-	ret = ospf_asbr_external_aggregator_unset(ospf, &p, tag);
+	if (argc == 5) {
+		if (strmatch(argv[idx]->text, "tag"))
+			tag = strtoul(argv[idx + 1]->arg, NULL, 10);
+		else if (strmatch(argv[idx]->text, "metric"))
+			metric = strtoul(argv[idx + 1]->arg, NULL, 10);
+	} else if (argc == 7) {
+		tag = strtoul(argv[idx + 1]->arg, NULL, 10);
+		metric = strtoul(argv[idx + 3]->arg, NULL, 10);
+	}
+
+	ret = ospf_asbr_external_aggregator_unset(ospf, &p, tag, metric);
 	if (ret == OSPF_INVALID)
 		vty_out(vty, "Inavlid configuration!!\n");
 
@@ -11544,7 +11568,10 @@ static int ospf_show_summary_address(struct vty *vty, struct ospf *ospf,
 						? "E1"
 						: "E2");
 
-				json_object_int_add(json_aggr, "Metric", mval);
+				json_object_int_add(json_aggr, "Metric",
+						    (aggr->metric != -1)
+							    ? aggr->metric
+							    : mval);
 
 				json_object_int_add(json_aggr, "Tag",
 						    aggr->tag);
@@ -11566,7 +11593,10 @@ static int ospf_show_summary_address(struct vty *vty, struct ospf *ospf,
 				(mtype == EXTERNAL_METRIC_TYPE_1)
 					? vty_out(vty, "%-16s", "E1")
 					: vty_out(vty, "%-16s", "E2");
-				vty_out(vty, "%-11d", mval);
+
+				vty_out(vty, "%-11d",
+					(aggr->metric != -1) ? aggr->metric
+							     : mval);
 
 				vty_out(vty, "%-12u", aggr->tag);
 
@@ -12305,6 +12335,9 @@ static int config_write_ospf_external_aggregator(struct vty *vty,
 				&aggr->p.prefix, aggr->p.prefixlen);
 			if (aggr->tag)
 				vty_out(vty, " tag %u ", aggr->tag);
+
+			if (aggr->metric != -1)
+				vty_out(vty, " metric %d ", aggr->metric);
 
 			if (CHECK_FLAG(aggr->flags,
 				       OSPF_EXTERNAL_AGGRT_NO_ADVERTISE))
