@@ -28,52 +28,28 @@ Following tests are covered to test ecmp functionality on BGP GSHUT.
    bgpd/zebra/staticd and frr services are restarted with eBGP peers
 """
 
+import json
 import os
 import sys
 import time
-import json
+
 import pytest
-
-# Save the Current Working Directory to find configuration files.
-CWD = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.join(CWD, "../"))
-sys.path.append(os.path.join(CWD, "../../"))
-
-# pylint: disable=C0413
-# Import topogen and topotest helpers
+from lib.bgp import (create_router_bgp, verify_bgp_attributes, verify_bgp_convergence,
+                     verify_bgp_rib)
+from lib.common_config import (check_address_types, create_bgp_community_lists,
+                               create_route_maps, get_frr_ipv6_linklocal,
+                               kill_router_daemons, required_linux_kernel_version,
+                               reset_config_on_routers, start_router,
+                               start_router_daemons,
+                               start_topology, step,
+                               stop_router, verify_rib, write_test_footer,
+                               write_test_header)
+from lib.micronet_compat import Topo
 from lib.topogen import Topogen, get_topogen
-from mininet.topo import Topo
-from time import sleep
-
-from lib.common_config import (
-    start_topology,
-    write_test_header,
-    write_test_footer,
-    verify_rib,
-    create_static_routes,
-    check_address_types,
-    interface_status,
-    reset_config_on_routers,
-    step,
-    get_frr_ipv6_linklocal,
-    kill_router_daemons,
-    start_router_daemons,
-    stop_router,
-    start_router,
-    create_route_maps,
-    create_bgp_community_lists,
-    delete_route_maps,
-    required_linux_kernel_version,
-)
+from lib.topojson import build_config_from_json, build_topo_from_json
 from lib.topolog import logger
-from lib.bgp import (
-    verify_bgp_convergence,
-    create_router_bgp,
-    clear_bgp,
-    verify_bgp_rib,
-    verify_bgp_attributes,
-)
-from lib.topojson import build_topo_from_json, build_config_from_json
+
+CWD = os.path.dirname(os.path.realpath(__file__))
 
 # Reading the data from JSON File for topology and configuration creation
 jsonFile = "{}/ebgp_gshut_topo1.json".format(CWD)
@@ -81,7 +57,7 @@ try:
     with open(jsonFile, "r") as topoJson:
         topo = json.load(topoJson)
 except IOError:
-    logger.info("Could not read file:", jsonFile)
+    logger.info("Could not read file: %s", jsonFile)
 
 # Global variables
 NETWORK = {"ipv4": "100.0.10.1/32", "ipv6": "1::1/128"}

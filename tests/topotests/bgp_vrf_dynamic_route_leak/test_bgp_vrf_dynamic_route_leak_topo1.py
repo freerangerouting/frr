@@ -31,55 +31,29 @@ Following tests are covered to test BGP Multi-VRF Dynamic Route Leaking:
 4. Verifying the JSON outputs for all supported commands
 """
 
-import os
-import sys
 import json
-import time
-import pytest
+import os
 import platform
+import sys
+import time
 
-# Save the Current Working Directory to find configuration files.
-CWD = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.join(CWD, "../"))
-sys.path.append(os.path.join(CWD, "../lib/"))
-
-# Required to instantiate the topology builder class.
-
-# pylint: disable=C0413
-# Import topogen and topotest helpers
+import pytest
+from lib.bgp import (create_router_bgp, verify_bgp_community,
+                     verify_bgp_convergence, verify_bgp_rib)
+from lib.common_config import (check_address_types, check_router_status,
+                               create_bgp_community_lists,
+                               create_interface_in_kernel, create_prefix_lists,
+                               create_route_maps, create_static_routes,
+                               start_topology, step, verify_cli_json,
+                               verify_fib_routes, write_test_footer,
+                               write_test_header)
+from lib.micronet_compat import Topo
 from lib.topogen import Topogen, get_topogen
-from lib.topotest import version_cmp
-from mininet.topo import Topo
-
-from lib.common_config import (
-    start_topology,
-    write_test_header,
-    check_address_types,
-    write_test_footer,
-    reset_config_on_routers,
-    verify_rib,
-    step,
-    create_route_maps,
-    shutdown_bringup_interface,
-    create_static_routes,
-    create_prefix_lists,
-    create_bgp_community_lists,
-    create_interface_in_kernel,
-    check_router_status,
-    verify_cli_json,
-    get_frr_ipv6_linklocal,
-    verify_fib_routes,
-)
-
+from lib.topojson import build_config_from_json, build_topo_from_json
 from lib.topolog import logger
-from lib.bgp import (
-    verify_bgp_convergence,
-    create_router_bgp,
-    clear_bgp,
-    verify_bgp_community,
-    verify_bgp_rib,
-)
-from lib.topojson import build_topo_from_json, build_config_from_json
+from lib.topotest import version_cmp
+
+CWD = os.path.dirname(os.path.realpath(__file__))
 
 # Reading the data from JSON File for topology creation
 jsonFile = "{}/bgp_vrf_dynamic_route_leak_topo1.json".format(CWD)
@@ -224,7 +198,6 @@ def disable_route_map_to_prefer_global_next_hop(tgen, topo):
 
     """
 
-    tc_name = request.node.name
     logger.info("Remove prefer-global rmap applied on neighbors")
     input_dict = {
         "r1": {
@@ -488,7 +461,7 @@ def disable_route_map_to_prefer_global_next_hop(tgen, topo):
     }
 
     result = create_router_bgp(tgen, topo, input_dict)
-    assert result is True, "Testcase {} :Failed \n Error: {}".format(tc_name, result)
+    assert result is True, "Testcase :Failed \n Error: {}".format(result)
 
     return True
 

@@ -62,18 +62,13 @@ r3-eth1 .3 |  | .3  r3-eth0      | .4 r4-eth0
 import os
 import re
 import sys
-import pytest
 from time import sleep
 
-from mininet.topo import Topo
-from mininet.net import Mininet
-from mininet.node import Node, OVSSwitch, Host
-from mininet.log import setLogLevel, info
-from mininet.cli import CLI
-from mininet.link import Intf
+import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib import topotest
+from lib.micronet_compat import Mininet, Topo
 
 fatal_error = ""
 
@@ -99,7 +94,7 @@ class NetworkTopo(Topo):
         # Setup Switches, add Interfaces and Connections
         switch = {}
         # First switch
-        switch[0] = self.addSwitch("sw0", cls=topotest.LegacySwitch)
+        switch[0] = self.addSwitch("sw0")
         self.addLink(
             switch[0],
             router[1],
@@ -115,7 +110,7 @@ class NetworkTopo(Topo):
             addr2="00:11:00:02:00:00",
         )
         # Second switch
-        switch[1] = self.addSwitch("sw1", cls=topotest.LegacySwitch)
+        switch[1] = self.addSwitch("sw1")
         self.addLink(
             switch[1],
             router[2],
@@ -138,7 +133,7 @@ class NetworkTopo(Topo):
             addr2="00:11:00:04:00:00",
         )
         # Third switch
-        switch[2] = self.addSwitch("sw2", cls=topotest.LegacySwitch)
+        switch[2] = self.addSwitch("sw2")
         self.addLink(
             switch[2],
             router[2],
@@ -341,8 +336,7 @@ def test_mpls_ldp_neighbor_establish():
             break
     else:
         # Bail out with error if a router fails to converge
-        fatal_error = "MPLS LDP neighbors did not establish"
-        assert False, "MPLS LDP neighbors did not establish" % ospfStatus
+        assert False, "MPLS LDP neighbors did not establish"
 
     print("MPLS LDP neighbors established.")
 
@@ -885,7 +879,6 @@ def test_shutdown_check_memleak():
 
 if __name__ == "__main__":
 
-    setLogLevel("info")
     # To suppress tracebacks, either use the following pytest call or add "--tb=no" to cli
     # retval = pytest.main(["-s", "--tb=no"])
     retval = pytest.main(["-s"])

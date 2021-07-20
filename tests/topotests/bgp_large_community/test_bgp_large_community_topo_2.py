@@ -59,43 +59,28 @@ Following tests are covered:
     statements.
 """
 
+import json
 import os
 import sys
-import json
-import pytest
 import time
 
-# Save the Current Working Directory to find configuration files.
-CWD = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.join(CWD, "../"))
-sys.path.append(os.path.join(CWD, "../lib/"))
-
-# pylint: disable=C0413
-# Import topogen and topotest helpers
-# Import topoJson from lib, to create topology and initial configuration
+import pytest
+from lib.bgp import (clear_bgp_and_verify, create_router_bgp,
+                     verify_bgp_convergence)
+from lib.common_config import (check_address_types, create_bgp_community_lists,
+                               create_route_maps, create_static_routes,
+                               delete_route_maps, required_linux_kernel_version,
+                               reset_config_on_routers,
+                               start_topology, step, verify_bgp_community,
+                               verify_create_community_list,
+                               verify_route_maps, write_test_footer,
+                               write_test_header)
+from lib.micronet_compat import Topo
 from lib.topogen import Topogen, get_topogen
-from mininet.topo import Topo
-
-from lib.common_config import (
-    start_topology,
-    write_test_header,
-    write_test_footer,
-    reset_config_on_routers,
-    create_route_maps,
-    create_bgp_community_lists,
-    create_prefix_lists,
-    verify_bgp_community,
-    step,
-    verify_create_community_list,
-    delete_route_maps,
-    verify_route_maps,
-    create_static_routes,
-    check_address_types,
-    required_linux_kernel_version,
-)
+from lib.topojson import build_config_from_json, build_topo_from_json
 from lib.topolog import logger
-from lib.bgp import verify_bgp_convergence, create_router_bgp, clear_bgp_and_verify
-from lib.topojson import build_topo_from_json, build_config_from_json
+
+CWD = os.path.dirname(os.path.realpath(__file__))
 
 # Reading the data from JSON File for topology and configuration creation
 jsonFile = "{}/bgp_large_community_topo_2.json".format(CWD)
